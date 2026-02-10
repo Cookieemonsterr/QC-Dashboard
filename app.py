@@ -150,43 +150,54 @@ def collapse_tickets(df: pd.DataFrame) -> pd.DataFrame:
     if not ref:
         return df
 
-    subject = safe_col(df, ["Subject", "Ticket Type"])
-    tscore = safe_col(df, ["Ticket Score"])
+    def first_non_empty(series: pd.Series):
+        s = series.dropna().astype(str).str.strip()
+        s = s[(s != "") & (s.str.lower() != "nan")]
+        return s.iloc[0] if len(s) else pd.NA
 
-    c_agent = safe_col(df, ["Catalogue Agent Name", "Catalogue Name"])
-    s_agent = safe_col(df, ["Studio Agent Name", "Studio Name"])
+    def unique_join(series: pd.Series, sep=" | "):
+        s = series.dropna().astype(str).str.strip()
+        s = s[(s != "") & (s.str.lower() != "nan")]
+        uniq = list(dict.fromkeys(s.tolist()))
+        return sep.join(uniq) if uniq else pd.NA
 
-    c_city = safe_col(df, ["Catalogue City", "City"])
-    c_market = safe_col(df, ["Catalogue Market", "Market"])
-    c_score = safe_col(df, ["Catalogue Score", "Catalogue Agent QC Score", "Catalogue Agent QC Score__2"])
-    c_dt = safe_col(df, ["Catalogue Date & Time", "Ticket Creation Time"])
+    def sum_numeric(series: pd.Series):
+        return pd.to_numeric(series, errors="coerce").fillna(0).sum()
 
-    s_city = safe_col(df, ["Studio City", "City__2"])
-    s_market = safe_col(df, ["Studio Market", "Market__2"])
-    s_score = safe_col(df, ["Studio Score", "Studio Agent QC Score", "Studio Agent QC Score__2"])
-    s_dt = safe_col(df, ["Studio Date & Time", "Ticket Creation Time__2"])
-
-    c_sb = safe_col(df, ["Catalogue Sent Back To Catalog", "Sent back to catalog"])
-    s_sb = safe_col(df, ["Studio Sent Back To Catalog", "Sent back to catalog__2"])
+    def max_numeric(series: pd.Series):
+        s = pd.to_numeric(series, errors="coerce")
+        return pd.NA if s.dropna().empty else s.max()
 
     agg = {}
 
-    # 1-value fields → take first non-empty
-    for col in [subject, tscore, c_city, c_market, c_score, c_dt, s_city, s_market, s_score, s_dt]:
-        if col:
+    for col in df.columns:
+        if col == ref:
+            continue
+
+        col_l = str(col).lower()
+
+        # 1) Join all catalogue agents on the ticket
+        if col_l in ["catalogue name", "catalog agent name"]:
+            agg[col] = unique_join
+            continue
+
+        # 2) Studio should be one person → take first non-empty
+        if col_l in ["studio name", "studio agent name"]:
             agg[col] = first_non_empty
+            continue
 
-    # sent back → sum
-    if c_sb:
-        agg[c_sb] = lambda x: pd.to_numeric(x, errors="coerce").fillna(0).sum()
-    if s_sb:
-        agg[s_sb] = lambda x: pd.to_numeric(x, errors="coerce").fillna(0).sum()
+        # 3) Sent back counters → sum
+        if "sent back" in col_l:
+            agg[col] = sum_numeric
+            continue
 
-    # multi-people fields → collect unique
-    if c_agent:
-        agg[c_agent] = unique_join
-    if s_agent:
-        agg[s_agent] = unique_join
+        # 4) 0/1 style fields (checkbox answers) → max (so if any row has 1, result is 1)
+        if any(k in col_l for k in ["uploaded", "added", "linked", "enabled", "registered", "tax", "yes", "no"]):
+            agg[col] = max_numeric
+            continue
+
+        # 5) Default: keep the first real value so you don’t lose details
+        agg[col] = first_non_empty
 
     out = df.groupby(ref, as_index=False).agg(agg)
     out.rename(columns={ref: "Reference ID"}, inplace=True)
