@@ -133,6 +133,11 @@ def map_ticket_type(raw: str) -> str:
 
 # ============================================================
 # ✅ COLLAPSE “SAME TICKET IN MULTIPLE ROWS” → 1 ROW PER TICKET
+#   Keeps key metrics correct for your workflow:
+#   - Catalogue Agent(s): unique join
+#   - Studio Agent: first non-empty
+#   - Sent Back columns: sum
+#   - Scores/Date/City/Market/etc: first non-empty
 # ============================================================
 def first_non_empty(series: pd.Series):
     s = series.dropna().astype(str).str.strip()
@@ -150,53 +155,52 @@ def collapse_tickets(df: pd.DataFrame) -> pd.DataFrame:
     if not ref:
         return df
 
-    def first_non_empty(series: pd.Series):
-        s = series.dropna().astype(str).str.strip()
-        s = s[(s != "") & (s.str.lower() != "nan")]
-        return s.iloc[0] if len(s) else pd.NA
+    # common columns (will vary; candidates handle duplicates)
+    subject = safe_col(df, ["Subject", "Ticket Type"])
+    tscore = safe_col(df, ["Ticket Score"])
 
-    def unique_join(series: pd.Series, sep=" | "):
-        s = series.dropna().astype(str).str.strip()
-        s = s[(s != "") & (s.str.lower() != "nan")]
-        uniq = list(dict.fromkeys(s.tolist()))
-        return sep.join(uniq) if uniq else pd.NA
+    c_agent = safe_col(df, ["Catalogue Agent Name", "Catalogue Name"])
+    s_agent = safe_col(df, ["Studio Agent Name", "Studio Name"])
 
-    def sum_numeric(series: pd.Series):
-        return pd.to_numeric(series, errors="coerce").fillna(0).sum()
+    c_city = safe_col(df, ["Catalogue City", "City"])
+    c_market = safe_col(df, ["Catalogue Market", "Market"])
+    c_score = safe_col(df, ["Catalogue Score", "Catalogue Agent QC Score", "Catalogue Agent QC Score__2"])
+    c_dt = safe_col(df, ["Catalogue Date & Time", "Ticket Creation Time"])
 
-    def max_numeric(series: pd.Series):
-        s = pd.to_numeric(series, errors="coerce")
-        return pd.NA if s.dropna().empty else s.max()
+    s_city = safe_col(df, ["Studio City", "City__2"])
+    s_market = safe_col(df, ["Studio Market", "Market__2"])
+    s_score = safe_col(df, ["Studio Score", "Studio Agent QC Score", "Studio Agent QC Score__2"])
+    s_dt = safe_col(df, ["Studio Date & Time", "Ticket Creation Time__2"])
+
+    c_sb = safe_col(df, ["Catalogue Sent Back To Catalog", "Sent back to catalog"])
+    s_sb = safe_col(df, ["Studio Sent Back To Catalog", "Sent back to catalog__2"])
 
     agg = {}
 
+    # 1-value fields → take first non-empty
+    for col in [subject, tscore, c_city, c_market, c_score, c_dt, s_city, s_market, s_score, s_dt]:
+        if col:
+            agg[col] = first_non_empty
+
+    # sent back → sum (separately!)
+    if c_sb:
+        agg[c_sb] = lambda x: pd.to_numeric(x, errors="coerce").fillna(0).sum()
+    if s_sb:
+        agg[s_sb] = lambda x: pd.to_numeric(x, errors="coerce").fillna(0).sum()
+
+    # multi-people fields → collect unique
+    if c_agent:
+        agg[c_agent] = unique_join
+    if s_agent:
+        agg[s_agent] = first_non_empty  # studio should be one person
+
+    # If we have other columns you want preserved, keep first non-empty by default
+    # (This avoids losing details when there are many rows per ticket.)
     for col in df.columns:
         if col == ref:
             continue
-
-        col_l = str(col).lower()
-
-        # 1) Join all catalogue agents on the ticket
-        if col_l in ["catalogue name", "catalog agent name"]:
-            agg[col] = unique_join
+        if col in agg:
             continue
-
-        # 2) Studio should be one person → take first non-empty
-        if col_l in ["studio name", "studio agent name"]:
-            agg[col] = first_non_empty
-            continue
-
-        # 3) Sent back counters → sum
-        if "sent back" in col_l:
-            agg[col] = sum_numeric
-            continue
-
-        # 4) 0/1 style fields (checkbox answers) → max (so if any row has 1, result is 1)
-        if any(k in col_l for k in ["uploaded", "added", "linked", "enabled", "registered", "tax", "yes", "no"]):
-            agg[col] = max_numeric
-            continue
-
-        # 5) Default: keep the first real value so you don’t lose details
         agg[col] = first_non_empty
 
     out = df.groupby(ref, as_index=False).agg(agg)
@@ -269,49 +273,69 @@ def load_clean_df() -> pd.DataFrame:
     col_subject = safe_col(df, ["Subject", "Ticket Type"])
     col_ticket_score = safe_col(df, ["Ticket Score"])
 
+    # IMPORTANT: per your rule names
     col_cat_agent = safe_col(df, ["Catalogue Agent Name", "Catalogue Name"])
     col_stu_agent = safe_col(df, ["Studio Agent Name", "Studio Name"])
 
     col_cat_score = safe_col(df, ["Catalogue Score", "Catalogue Agent QC Score"])
     col_stu_score = safe_col(df, ["Studio Score", "Studio Agent QC Score"])
 
+    # IMPORTANT: separate sent back sources
     col_cat_sb = safe_col(df, ["Catalogue Sent Back To Catalog", "Sent back to catalog"])
     col_stu_sb = safe_col(df, ["Studio Sent Back To Catalog", "Sent back to catalog__2"])
 
     col_cat_dt = safe_col(df, ["Catalogue Date & Time", "Ticket Creation Time"])
     col_stu_dt = safe_col(df, ["Studio Date & Time", "Ticket Creation Time__2"])
 
-    col_city = safe_col(df, ["Catalogue City", "Studio City", "City"])
-    col_market = safe_col(df, ["Catalogue Market", "Studio Market", "Market"])
+    # City/Market candidates incl __2
+    col_city = safe_col(df, ["Catalogue City", "Studio City", "City", "City__2"])
+    col_market = safe_col(df, ["Catalogue Market", "Studio Market", "Market", "Market__2"])
 
     # standardized columns used by dashboard
     df["ticket_id"] = df[col_ref].astype(str) if col_ref else df.index.astype(str)
     df["ticket_type_raw"] = df[col_subject].astype(str) if col_subject else ""
     df["ticket_type"] = df["ticket_type_raw"].apply(map_ticket_type)
 
+    # Scores
     df["ticket_score_pct"] = _to_pct(df[col_ticket_score]) if col_ticket_score else pd.NA
     df["catalog_score_pct"] = _to_pct(df[col_cat_score]) if col_cat_score else pd.NA
     df["studio_score_pct"] = _to_pct(df[col_stu_score]) if col_stu_score else pd.NA
 
+    # Agents
     df["catalog_agent"] = df[col_cat_agent] if col_cat_agent else pd.NA
     df["studio_agent"] = df[col_stu_agent] if col_stu_agent else pd.NA
 
+    # Sent back (keep separate!)
     df["catalog_sent_back"] = pd.to_numeric(df[col_cat_sb], errors="coerce").fillna(0) if col_cat_sb else 0
     df["studio_sent_back"] = pd.to_numeric(df[col_stu_sb], errors="coerce").fillna(0) if col_stu_sb else 0
 
+    # City/Market
     df["city"] = df[col_city] if col_city else pd.NA
     df["market"] = df[col_market] if col_market else pd.NA
 
+    # Datetime
     cat_dt = pd.to_datetime(df[col_cat_dt], errors="coerce") if col_cat_dt else pd.NaT
     stu_dt = pd.to_datetime(df[col_stu_dt], errors="coerce") if col_stu_dt else pd.NaT
     df["dt"] = cat_dt.fillna(stu_dt)
+
+    # If most datetimes fail, warn (prevents “empty dashboard panic”)
+    if df["dt"].notna().mean() < 0.2:
+        st.warning("Most Date & Time values could not be parsed. Check sheet datetime formats.")
 
     df["date"] = df["dt"].dt.date
     df["month"] = df["dt"].dt.to_period("M").astype(str)
     df["week"] = df["dt"].dt.isocalendar().week.astype("Int64")
     df["day"] = df["dt"].dt.day_name()
 
-    df["total_qc_pct"] = df[["catalog_score_pct", "studio_score_pct"]].mean(axis=1, skipna=True)
+    # ✅ YOUR RULES:
+    # Catalog QC = Catalogue Score
+    # Studio QC = Studio Score
+    # Total QC = Ticket Score
+    df["total_qc_pct"] = df["ticket_score_pct"]
+
+    # Optional: keep combined metric if you ever want it later
+    df["combined_qc_pct"] = df[["catalog_score_pct", "studio_score_pct"]].mean(axis=1, skipna=True)
+
     return df
 
 # ============================================================
@@ -362,16 +386,16 @@ sel_stu_agents = st.sidebar.multiselect("Studio Agent", stu_agents, default=[])
 
 ticket_id_search = st.sidebar.text_input("Ticket ID contains", value="")
 
+# ✅ Make score selection match your definitions clearly
 score_type = st.sidebar.selectbox(
     "Score Type",
-    ["Total QC Score", "Catalog Agent QC Score", "Studio Agent QC Score", "Ticket Score"],
+    ["Ticket Score (Total QC)", "Catalogue Score", "Studio Score"],
     index=0,
 )
 score_col = {
-    "Total QC Score": "total_qc_pct",
-    "Catalog Agent QC Score": "catalog_score_pct",
-    "Studio Agent QC Score": "studio_score_pct",
-    "Ticket Score": "ticket_score_pct",
+    "Ticket Score (Total QC)": "ticket_score_pct",
+    "Catalogue Score": "catalog_score_pct",
+    "Studio Score": "studio_score_pct",
 }[score_type]
 
 # ============================================================
@@ -404,12 +428,9 @@ if ticket_id_search.strip():
 # HEADER
 # ============================================================
 left, right = st.columns([0.78, 0.22], vertical_alignment="bottom")
-
 with left:
-    st.markdown(
-        '<div class="qc-title">QC Scores Dashboard</div>',
-        unsafe_allow_html=True,
-    )
+    st.markdown('<div class="qc-title">QC Scores Dashboard</div>', unsafe_allow_html=True)
+    st.markdown('<div class="qc-sub">Catalog QC = Catalogue Score • Studio QC = Studio Score • Total QC = Ticket Score</div>', unsafe_allow_html=True)
 
 with right:
     st.download_button(
@@ -423,30 +444,30 @@ with right:
 st.markdown("<hr/>", unsafe_allow_html=True)
 
 # ============================================================
-# KPI ROW
+# KPI ROW (FIXED + SEPARATE SENT BACK)
 # ============================================================
 k1, k2, k3, k4, k5, k6 = st.columns(6)
 
-catalog_avg = mean_pct(f["catalog_score_pct"])
-studio_avg = mean_pct(f["studio_score_pct"])
-total_avg = mean_pct(f["total_qc_pct"])
-ticket_avg = mean_pct(f["ticket_score_pct"])
+catalog_avg = mean_pct(f["catalog_score_pct"])     # Catalogue Score
+studio_avg = mean_pct(f["studio_score_pct"])       # Studio Score
+total_avg = mean_pct(f["ticket_score_pct"])        # Ticket Score = Total QC
 
-sent_back_total = int(
-    pd.to_numeric(f["catalog_sent_back"], errors="coerce").fillna(0).sum()
-    + pd.to_numeric(f["studio_sent_back"], errors="coerce").fillna(0).sum()
-)
-low_perf = int((pd.to_numeric(f["total_qc_pct"], errors="coerce") < 90).fillna(False).sum())
+sent_back_catalog = int(pd.to_numeric(f["catalog_sent_back"], errors="coerce").fillna(0).sum())
+sent_back_studio = int(pd.to_numeric(f["studio_sent_back"], errors="coerce").fillna(0).sum())
+low_perf = int((pd.to_numeric(f["ticket_score_pct"], errors="coerce") < 90).fillna(False).sum())
 
 with k1: kpi_card("Catalog QC", "—" if catalog_avg is None else f"{catalog_avg:.2f}%")
 with k2: kpi_card("Studio QC", "—" if studio_avg is None else f"{studio_avg:.2f}%")
-with k3: kpi_card("Total QC", "—" if total_avg is None else f"{total_avg:.2f}%")
-with k4: kpi_card("Ticket Score", "—" if ticket_avg is None else f"{ticket_avg:.2f}%")
-with k6: kpi_card("Sent Back", f"{sent_back_total:,}")
+with k3: kpi_card("Total QC (Ticket)", "—" if total_avg is None else f"{total_avg:.2f}%")
+with k4: kpi_card("Low performers (<90%)", f"{low_perf:,}")
+with k5: kpi_card("Sent Back → Catalog", f"{sent_back_catalog:,}")
+with k6: kpi_card("Sent Back → Studio", f"{sent_back_studio:,}")
 
 st.markdown("<br/>", unsafe_allow_html=True)
 
-
+# ============================================================
+# MAIN TABLE + SCORE CHANGE
+# ============================================================
 a, b = st.columns([0.62, 0.38])
 
 with a:
@@ -455,7 +476,7 @@ with a:
         "ticket_id", "ticket_type", "ticket_type_raw",
         "catalog_agent", "catalog_score_pct",
         "studio_agent", "studio_score_pct",
-        "total_qc_pct", "ticket_score_pct",
+        "ticket_score_pct",  # ticket score is the total QC in your definition
         "city", "market", "dt",
         "catalog_sent_back", "studio_sent_back",
     ]
@@ -467,10 +488,9 @@ with a:
         use_container_width=True,
         height=460,
         column_config={
-            "catalog_score_pct": st.column_config.NumberColumn("Catalog Score", format="%.2f%%"),
+            "catalog_score_pct": st.column_config.NumberColumn("Catalogue Score", format="%.2f%%"),
             "studio_score_pct": st.column_config.NumberColumn("Studio Score", format="%.2f%%"),
-            "total_qc_pct": st.column_config.NumberColumn("Total QC", format="%.2f%%"),
-            "ticket_score_pct": st.column_config.NumberColumn("Ticket Score", format="%.2f%%"),
+            "ticket_score_pct": st.column_config.NumberColumn("Ticket Score (Total QC)", format="%.2f%%"),
             "dt": st.column_config.DatetimeColumn("Date & Time"),
         },
     )
@@ -484,7 +504,7 @@ with b:
         t["date_only"] = t["dt"].dt.date
         daily = (
             t.groupby("date_only", as_index=False)[
-                ["catalog_score_pct", "studio_score_pct", "total_qc_pct", "ticket_score_pct"]
+                ["catalog_score_pct", "studio_score_pct", "ticket_score_pct"]
             ]
             .mean(numeric_only=True)
             .sort_values("date_only")
@@ -495,7 +515,9 @@ with b:
 
 st.markdown("<br/>", unsafe_allow_html=True)
 
-
+# ============================================================
+# CHARTS
+# ============================================================
 c1, c2, c3 = st.columns([0.34, 0.33, 0.33])
 
 with c1:
@@ -512,17 +534,30 @@ with c2:
     if s.empty:
         st.info("No score values available.")
     else:
-        fig = px.histogram(s, nbins=20)
+        fig = px.histogram(x=s, nbins=20)
         fig.update_layout(height=320, margin=dict(l=10, r=10, t=10, b=10), xaxis_title="Score (%)", yaxis_title="Tickets")
         st.plotly_chart(fig, use_container_width=True)
 
 with c3:
     st.markdown("### Tickets by City")
-    city_counts = f["city"].fillna("Unknown").astype(str).value_counts().reset_index()
+    # ✅ Exclude Unknown cleanly (no “Unknown” in chart)
+    city_counts = (
+        f["city"]
+        .dropna()
+        .astype(str)
+        .str.strip()
+        .loc[lambda s: (s != "") & (s.str.lower() != "nan") & (s.str.lower() != "unknown")]
+        .value_counts()
+        .reset_index()
+    )
     city_counts.columns = ["city", "ticket_count"]
-    fig = px.bar(city_counts.head(20), x="city", y="ticket_count")
-    fig.update_layout(height=320, margin=dict(l=10, r=10, t=10, b=10), xaxis_title="", yaxis_title="")
-    st.plotly_chart(fig, use_container_width=True)
+
+    if city_counts.empty:
+        st.info("No city data available (after excluding Unknown).")
+    else:
+        fig = px.bar(city_counts.head(20), x="city", y="ticket_count")
+        fig.update_layout(height=320, margin=dict(l=10, r=10, t=10, b=10), xaxis_title="", yaxis_title="")
+        st.plotly_chart(fig, use_container_width=True)
 
 st.markdown("<br/>", unsafe_allow_html=True)
 
@@ -539,14 +574,14 @@ with p1:
         f.groupby("catalog_agent", dropna=False)
         .agg(
             tickets=("ticket_id", "count"),
-            avg_catalog=("catalog_score_pct", "mean"),
-            avg_total=("total_qc_pct", "mean"),
-            sent_back=("catalog_sent_back", "sum"),
+            avg_catalog=("catalog_score_pct", "mean"),       # Catalogue Score
+            avg_ticket=("ticket_score_pct", "mean"),         # Ticket Score (Total QC)
+            sent_back=("catalog_sent_back", "sum"),          # Sent back to catalog
         )
         .reset_index()
-        .sort_values(["avg_total", "tickets"], ascending=[True, False])
+        .sort_values(["avg_ticket", "tickets"], ascending=[True, False])
     )
-    ca["low_perf_flag"] = (ca["avg_total"] < 90).fillna(False)
+    ca["low_perf_flag"] = (ca["avg_ticket"] < 90).fillna(False)
     st.dataframe(
         ca,
         use_container_width=True,
@@ -554,9 +589,9 @@ with p1:
         column_config={
             "catalog_agent": st.column_config.TextColumn("Catalogue Agent"),
             "tickets": st.column_config.NumberColumn("Tickets"),
-            "avg_catalog": st.column_config.NumberColumn("Avg Catalog", format="%.2f%%"),
-            "avg_total": st.column_config.NumberColumn("Avg Total", format="%.2f%%"),
-            "sent_back": st.column_config.NumberColumn("Sent Back"),
+            "avg_catalog": st.column_config.NumberColumn("Avg Catalogue Score", format="%.2f%%"),
+            "avg_ticket": st.column_config.NumberColumn("Avg Ticket Score (Total QC)", format="%.2f%%"),
+            "sent_back": st.column_config.NumberColumn("Sent Back → Catalog"),
             "low_perf_flag": st.column_config.CheckboxColumn("Low performer (<90%)"),
         },
     )
@@ -567,14 +602,14 @@ with p2:
         f.groupby("studio_agent", dropna=False)
         .agg(
             tickets=("ticket_id", "count"),
-            avg_studio=("studio_score_pct", "mean"),
-            avg_total=("total_qc_pct", "mean"),
-            sent_back=("studio_sent_back", "sum"),
+            avg_studio=("studio_score_pct", "mean"),         # Studio Score
+            avg_ticket=("ticket_score_pct", "mean"),         # Ticket Score (Total QC)
+            sent_back=("studio_sent_back", "sum"),           # Sent back to studio
         )
         .reset_index()
-        .sort_values(["avg_total", "tickets"], ascending=[True, False])
+        .sort_values(["avg_ticket", "tickets"], ascending=[True, False])
     )
-    sa["low_perf_flag"] = (sa["avg_total"] < 90).fillna(False)
+    sa["low_perf_flag"] = (sa["avg_ticket"] < 90).fillna(False)
     st.dataframe(
         sa,
         use_container_width=True,
@@ -582,9 +617,9 @@ with p2:
         column_config={
             "studio_agent": st.column_config.TextColumn("Studio Agent"),
             "tickets": st.column_config.NumberColumn("Tickets"),
-            "avg_studio": st.column_config.NumberColumn("Avg Studio", format="%.2f%%"),
-            "avg_total": st.column_config.NumberColumn("Avg Total", format="%.2f%%"),
-            "sent_back": st.column_config.NumberColumn("Sent Back"),
+            "avg_studio": st.column_config.NumberColumn("Avg Studio Score", format="%.2f%%"),
+            "avg_ticket": st.column_config.NumberColumn("Avg Ticket Score (Total QC)", format="%.2f%%"),
+            "sent_back": st.column_config.NumberColumn("Sent Back → Studio"),
             "low_perf_flag": st.column_config.CheckboxColumn("Low performer (<90%)"),
         },
     )
