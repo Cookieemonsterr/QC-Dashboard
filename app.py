@@ -375,7 +375,6 @@ left, right = st.columns([0.78, 0.22], vertical_alignment="bottom")
 with left:
     st.markdown('<div class="qc-title">QC Scores Dashboard</div>', unsafe_allow_html=True)
     st.markdown(
-        '<div class="qc-sub">Catalog QC = Catalogue Score • Studio QC = Studio Score • Total QC = Ticket Score</div>',
         unsafe_allow_html=True,
     )
 with right:
