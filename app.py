@@ -560,12 +560,3 @@ with p2:
             "low_perf_flag": st.column_config.CheckboxColumn("Low performer (<90%)"),
         },
     )
-
-with st.expander("🔎 Debug: subjects that became Other (should be near zero)"):
-    other_vals = (
-        df[df["ticket_type"] == "Other"]["ticket_type_raw"]
-        .fillna("")
-        .astype(str)
-        .str.strip()
-    )
-    st.dataframe(other_vals.value_counts().reset_index().head(120), use_container_width=True)
