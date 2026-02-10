@@ -393,11 +393,13 @@ if ticket_id_search.strip():
 # HEADER
 # ============================================================
 left, right = st.columns([0.78, 0.22], vertical_alignment="bottom")
+
 with left:
-    st.markdown('<div class="qc-title">QC Scores Dashboard</div>', unsafe_allow_html=True)
     st.markdown(
+        '<div class="qc-title">QC Scores Dashboard</div>',
         unsafe_allow_html=True,
     )
+
 with right:
     st.download_button(
         "⬇️ Download filtered CSV",
