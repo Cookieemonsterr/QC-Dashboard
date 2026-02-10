@@ -1,6 +1,3 @@
-# app.py
-# QC Scores Dashboard (iStep-style) — Auto-load from Google Sheets (no uploads), robust download,
-# collapses multi-row tickets to 1 row per Reference ID, Build/Update/Existing filters, light+dark safe UI.
 
 import io
 import re
@@ -12,9 +9,6 @@ import pandas as pd
 import plotly.express as px
 import streamlit as st
 
-# ============================================================
-# ✅ YOUR GOOGLE SHEET (PUBLIC VIEWER REQUIRED)
-# ============================================================
 SHEET_ID = "1rQHlDgQC5mZQ00fPVz20h4KEFbmsosE2"
 
 XLSX_URL = f"https://docs.google.com/spreadsheets/d/{SHEET_ID}/export?format=xlsx"
@@ -195,9 +189,6 @@ def collapse_tickets(df: pd.DataFrame) -> pd.DataFrame:
     out.rename(columns={ref: "Reference ID"}, inplace=True)
     return out
 
-# ============================================================
-# ✅ ROBUST DOWNLOAD
-# ============================================================
 def _http_get(url: str) -> requests.Response:
     headers = {"User-Agent": "Mozilla/5.0", "Accept": "*/*"}
     return requests.get(url, headers=headers, timeout=120, allow_redirects=True)
@@ -414,15 +405,12 @@ low_perf = int((pd.to_numeric(f["ticket_score_pct"], errors="coerce") < 90).fill
 with k1: kpi_card("Catalog QC", "—" if catalog_avg is None else f"{catalog_avg:.2f}%")
 with k2: kpi_card("Studio QC", "—" if studio_avg is None else f"{studio_avg:.2f}%")
 with k3: kpi_card("Total QC (Ticket)", "—" if total_avg is None else f"{total_avg:.2f}%")
-with k4: kpi_card("Low performers (<90%)", f"{low_perf:,}")
-with k5: kpi_card("Sent Back → Catalog", f"{sent_back_catalog:,}")
-with k6: kpi_card("Sent Back → Studio", f"{sent_back_studio:,}")
+with k4: kpi_card("Sent Back → Catalog", f"{sent_back_catalog:,}")
+with k5: kpi_card("Sent Back → Studio", f"{sent_back_studio:,}")
 
 st.markdown("<br/>", unsafe_allow_html=True)
 
-# ============================================================
-# TABLE + CHARTS
-# ============================================================
+
 a, b = st.columns([0.62, 0.38])
 
 with a:
