@@ -116,50 +116,11 @@ def kpi_card(label: str, value: str, delta: str | None = None):
     d += "</div>"
     st.markdown(d, unsafe_allow_html=True)
 
-def _clean_str(x) -> str:
-    if x is None or (isinstance(x, float) and pd.isna(x)):
-        return ""
-    s = str(x).strip()
-    if s.lower() == "nan":
-        return ""
-    return s
-
-def _norm_spaces(s: str) -> str:
-    return re.sub(r"\s+", " ", (s or "")).strip()
-
-def _norm_city(s: str) -> str:
-    s = _norm_spaces(_clean_str(s))
-    if not s:
-        return ""
-    mapping = {
-        "AbuDhabi": "Abu Dhabi",
-        "Abu dhabi": "Abu Dhabi",
-        "AL AIN": "Al Ain",
-        "Alain": "Al Ain",
-        "AL SHARJAH": "Sharjah",
-        "Sharjah ": "Sharjah",
-    }
-    return mapping.get(s, s)
-
-def _safe_num(x) -> float:
-    if x is None:
-        return 0.0
-    if isinstance(x, (int, float)) and not pd.isna(x):
-        return float(x)
-    s = _clean_str(x)
-    if not s:
-        return 0.0
-    s = s.replace("%", "").strip()
-    try:
-        return float(s)
-    except:
-        return 0.0
-
 # ============================================================
-# ✅ TICKET TYPE RULES (NO "UNKNOWN" TYPES)
+# ✅ TICKET TYPE RULES (NO UNKNOWN)
 # ============================================================
 def map_ticket_type(raw: str) -> str:
-    s = _norm_spaces(_clean_str(raw))
+    s = ("" if raw is None else str(raw)).strip()
     low = s.lower()
     if low.startswith("outlet catalogue update request"):
         return "Update Tickets"
@@ -174,13 +135,13 @@ def map_ticket_type(raw: str) -> str:
 # ✅ COLLAPSE “SAME TICKET IN MULTIPLE ROWS” → 1 ROW PER TICKET
 # ============================================================
 def first_non_empty(series: pd.Series):
-    s = series.dropna().astype(str).map(_clean_str)
-    s = s[s != ""]
+    s = series.dropna().astype(str).str.strip()
+    s = s[(s != "") & (s.str.lower() != "nan")]
     return s.iloc[0] if len(s) else pd.NA
 
 def unique_join(series: pd.Series, sep=" | "):
-    s = series.dropna().astype(str).map(_clean_str)
-    s = s[s != ""]
+    s = series.dropna().astype(str).str.strip()
+    s = s[(s != "") & (s.str.lower() != "nan")]
     uniq = list(dict.fromkeys(s.tolist()))
     return sep.join(uniq) if uniq else pd.NA
 
@@ -230,95 +191,6 @@ def collapse_tickets(df: pd.DataFrame) -> pd.DataFrame:
     out = df.groupby(ref, as_index=False).agg(agg)
     out.rename(columns={ref: "Reference ID"}, inplace=True)
     return out
-
-# ============================================================
-# ✅ MISTAKE / DEDUCTION LOGIC (CALC)
-# Rule: if Ticket Score == 100% → mistakes = 0 even if deduction columns have values
-# ============================================================
-UPDATE_UNIT_POINTS = {
-    "Spelling Mistake": 5,
-    "profile update": 5,
-    "Calories": 3,
-    "Categories": 7,
-    "Item Name": 5,
-    "Missing Items": 10,
-    "Missing items": 10,
-    "Item Price": 15,
-    "Description": 5,
-    "Addon (Min :Max)": 10,
-    "Addon - Missing/Wrong option name": 10,
-    "Addon Price": 15,
-    "Translation": 5,
-    "Item Operational Hours": 10,
-}
-
-STUDIO_UNIT_POINTS = {
-    "Hero Image": 30,
-    "Image without Text/Price/Code/Logo/Graphics": 15,
-    "Image Uploaded to its Proper Item/Images weren't uploaded": 20,
-    "Logo Missing": 15,
-    "Correct Image Size/Dimensions": 10,
-    "Images Pixelated": 10,
-}
-
-LOCATION_UPDATE_UNIT_POINTS = {
-    "Location Pin": 25,
-    "City": 25,
-    "Zone Name/Zone Extensions": 25,
-    "Zone Name & Zone Extensions": 25,
-    "Zone Name & Extensional Zones": 25,
-    "Full Address": 25,
-}
-
-# (We keep Build/Existing maps minimal here for safety; you can expand anytime)
-BUILD_EXISTING_GENERIC = {
-    "Location Pin": 10,
-    "City": 2,
-    "Full Address": 2,
-    "Operational Hours": 9,
-    "Login ID": 2,
-    "Phone Number": 2,
-    "Email": 2,
-    "Role": 2,
-    "Name": 2,
-}
-
-def _pick_unit_map(ticket_type: str) -> dict:
-    if ticket_type == "Update Tickets":
-        merged = {}
-        merged.update(UPDATE_UNIT_POINTS)
-        merged.update(STUDIO_UNIT_POINTS)
-        merged.update(LOCATION_UPDATE_UNIT_POINTS)
-        return merged
-    if ticket_type == "Build Tickets":
-        return BUILD_EXISTING_GENERIC
-    if ticket_type == "Existing Tickets":
-        return BUILD_EXISTING_GENERIC
-    return {}
-
-def compute_deductions_and_mistakes(row: pd.Series, ticket_type: str, ticket_score_pct: float):
-    # If 100% ticket score: ignore everything
-    if ticket_score_pct >= 100:
-        return 0.0, 0
-
-    unit_map = _pick_unit_map(ticket_type)
-    if not unit_map:
-        return 0.0, 0
-
-    deducted = 0.0
-    mistakes = 0
-
-    for col, unit in unit_map.items():
-        if col in row.index:
-            v = _safe_num(row[col])
-            if v > 0:
-                deducted += v
-                m = int(round(v / float(unit)))
-                if m == 0:
-                    m = 1
-                mistakes += m
-
-    return deducted, mistakes
 
 # ============================================================
 # ✅ ROBUST DOWNLOAD (XLSX → CSV) + FRIENDLY ERROR BOX
@@ -398,13 +270,8 @@ def load_clean_df() -> pd.DataFrame:
     col_cat_dt = safe_col(df, ["Catalogue Date & Time", "Ticket Creation Time"])
     col_stu_dt = safe_col(df, ["Studio Date & Time", "Ticket Creation Time__2"])
 
-    # city/market candidates
-    col_cat_city = safe_col(df, ["Catalogue City"])
-    col_stu_city = safe_col(df, ["Studio City"])
-    col_city_any = safe_col(df, ["City"])
-    col_cat_market = safe_col(df, ["Catalogue Market"])
-    col_stu_market = safe_col(df, ["Studio Market"])
-    col_market_any = safe_col(df, ["Market"])
+    col_city = safe_col(df, ["Catalogue City", "Studio City", "City"])
+    col_market = safe_col(df, ["Catalogue Market", "Studio Market", "Market"])
 
     # standardized columns used by dashboard
     df["ticket_id"] = df[col_ref].astype(str) if col_ref else df.index.astype(str)
@@ -415,70 +282,25 @@ def load_clean_df() -> pd.DataFrame:
     df["catalog_score_pct"] = _to_pct(df[col_cat_score]) if col_cat_score else pd.NA
     df["studio_score_pct"] = _to_pct(df[col_stu_score]) if col_stu_score else pd.NA
 
-    # Agents: fix None -> Unassigned
-    df["catalog_agent"] = (df[col_cat_agent] if col_cat_agent else pd.NA).astype("string")
-    df["studio_agent"] = (df[col_stu_agent] if col_stu_agent else pd.NA).astype("string")
-    df["catalog_agent"] = df["catalog_agent"].fillna("").map(_clean_str)
-    df["studio_agent"] = df["studio_agent"].fillna("").map(_clean_str)
-    df.loc[df["catalog_agent"] == "", "catalog_agent"] = "Unassigned"
-    df.loc[df["studio_agent"] == "", "studio_agent"] = "Unassigned"
+    df["catalog_agent"] = df[col_cat_agent] if col_cat_agent else pd.NA
+    df["studio_agent"] = df[col_stu_agent] if col_stu_agent else pd.NA
 
     df["catalog_sent_back"] = pd.to_numeric(df[col_cat_sb], errors="coerce").fillna(0) if col_cat_sb else 0
     df["studio_sent_back"] = pd.to_numeric(df[col_stu_sb], errors="coerce").fillna(0) if col_stu_sb else 0
 
-    # Datetime
+    df["city"] = df[col_city] if col_city else pd.NA
+    df["market"] = df[col_market] if col_market else pd.NA
+
     cat_dt = pd.to_datetime(df[col_cat_dt], errors="coerce") if col_cat_dt else pd.NaT
     stu_dt = pd.to_datetime(df[col_stu_dt], errors="coerce") if col_stu_dt else pd.NaT
     df["dt"] = cat_dt.fillna(stu_dt)
+
     df["date"] = df["dt"].dt.date
     df["month"] = df["dt"].dt.to_period("M").astype(str)
     df["week"] = df["dt"].dt.isocalendar().week.astype("Int64")
     df["day"] = df["dt"].dt.day_name()
 
-    # ✅ City: resolve from best available (Catalogue City → Studio City → City)
-    cat_city = df[col_cat_city] if col_cat_city else pd.NA
-    stu_city = df[col_stu_city] if col_stu_city else pd.NA
-    any_city = df[col_city_any] if col_city_any else pd.NA
-
-    resolved_city = []
-    for a, b, c in zip(cat_city, stu_city, any_city):
-        aa = _norm_city(a)
-        bb = _norm_city(b)
-        cc = _norm_city(c)
-        resolved_city.append(aa or bb or cc or "Unknown")
-    df["city"] = resolved_city
-
-    # Market: prefer Catalogue Market → Studio Market → Market
-    cat_m = df[col_cat_market] if col_cat_market else pd.NA
-    stu_m = df[col_stu_market] if col_stu_market else pd.NA
-    any_m = df[col_market_any] if col_market_any else pd.NA
-    resolved_market = []
-    for a, b, c in zip(cat_m, stu_m, any_m):
-        aa = _clean_str(a)
-        bb = _clean_str(b)
-        cc = _clean_str(c)
-        resolved_market.append(aa or bb or cc or "")
-    df["market"] = resolved_market
-
-    # Total qc score
     df["total_qc_pct"] = df[["catalog_score_pct", "studio_score_pct"]].mean(axis=1, skipna=True)
-
-    # ✅ Deducted Points + Mistakes (calc)
-    # (Only uses columns that exist; safe.)
-    deducted_list = []
-    mistakes_list = []
-    ticket_score_series = pd.to_numeric(df["ticket_score_pct"], errors="coerce").fillna(0)
-
-    for idx, row in df.iterrows():
-        ttype = row.get("ticket_type", "Other")
-        tscore = float(ticket_score_series.loc[idx]) if idx in ticket_score_series.index else 0.0
-        ded, mis = compute_deductions_and_mistakes(row, ttype, tscore)
-        deducted_list.append(ded)
-        mistakes_list.append(mis)
-
-    df["deducted_points_calc"] = deducted_list
-    df["mistakes_calc"] = mistakes_list
-
     return df
 
 # ============================================================
@@ -507,8 +329,6 @@ view_mode = st.sidebar.radio(
     ["All", "Build Tickets", "Update Tickets", "Existing Tickets"],
     index=0,
 )
-
-exclude_unassigned = st.sidebar.checkbox("Exclude Unassigned agents from leaderboards", value=True)
 
 min_dt = df["dt"].min()
 max_dt = df["dt"].max()
@@ -607,15 +427,12 @@ sent_back_total = int(
 )
 low_perf = int((pd.to_numeric(f["total_qc_pct"], errors="coerce") < 90).fillna(False).sum())
 
-mistakes_sum = int(pd.to_numeric(f["mistakes_calc"], errors="coerce").fillna(0).sum())
-deducted_sum = float(pd.to_numeric(f["deducted_points_calc"], errors="coerce").fillna(0).sum())
-
 with k1: kpi_card("Catalog QC", "—" if catalog_avg is None else f"{catalog_avg:.2f}%")
 with k2: kpi_card("Studio QC", "—" if studio_avg is None else f"{studio_avg:.2f}%")
 with k3: kpi_card("Total QC", "—" if total_avg is None else f"{total_avg:.2f}%")
 with k4: kpi_card("Ticket Score", "—" if ticket_avg is None else f"{ticket_avg:.2f}%")
 with k5: kpi_card("Tickets", f"{len(f):,}", f"{low_perf:,} under 90%")
-with k6: kpi_card("Mistakes", f"{mistakes_sum:,}", f"Deducted: {deducted_sum:.0f} pts")
+with k6: kpi_card("Sent Back", f"{sent_back_total:,}")
 
 st.markdown("<br/>", unsafe_allow_html=True)
 
@@ -631,7 +448,6 @@ with a:
         "catalog_agent", "catalog_score_pct",
         "studio_agent", "studio_score_pct",
         "total_qc_pct", "ticket_score_pct",
-        "mistakes_calc", "deducted_points_calc",
         "city", "market", "dt",
         "catalog_sent_back", "studio_sent_back",
     ]
@@ -647,8 +463,6 @@ with a:
             "studio_score_pct": st.column_config.NumberColumn("Studio Score", format="%.2f%%"),
             "total_qc_pct": st.column_config.NumberColumn("Total QC", format="%.2f%%"),
             "ticket_score_pct": st.column_config.NumberColumn("Ticket Score", format="%.2f%%"),
-            "mistakes_calc": st.column_config.NumberColumn("Mistakes (calc)"),
-            "deducted_points_calc": st.column_config.NumberColumn("Deducted (calc)"),
             "dt": st.column_config.DatetimeColumn("Date & Time"),
         },
     )
@@ -715,18 +529,13 @@ p1, p2 = st.columns([0.52, 0.48])
 
 with p1:
     st.markdown("### Catalogue agents")
-    ca_src = f.copy()
-    if exclude_unassigned:
-        ca_src = ca_src[ca_src["catalog_agent"] != "Unassigned"]
-
     ca = (
-        ca_src.groupby("catalog_agent", dropna=False)
+        f.groupby("catalog_agent", dropna=False)
         .agg(
             tickets=("ticket_id", "count"),
             avg_catalog=("catalog_score_pct", "mean"),
             avg_total=("total_qc_pct", "mean"),
             sent_back=("catalog_sent_back", "sum"),
-            mistakes=("mistakes_calc", "sum"),
         )
         .reset_index()
         .sort_values(["avg_total", "tickets"], ascending=[True, False])
@@ -742,25 +551,19 @@ with p1:
             "avg_catalog": st.column_config.NumberColumn("Avg Catalog", format="%.2f%%"),
             "avg_total": st.column_config.NumberColumn("Avg Total", format="%.2f%%"),
             "sent_back": st.column_config.NumberColumn("Sent Back"),
-            "mistakes": st.column_config.NumberColumn("Mistakes (calc)"),
             "low_perf_flag": st.column_config.CheckboxColumn("Low performer (<90%)"),
         },
     )
 
 with p2:
     st.markdown("### Studio agents")
-    sa_src = f.copy()
-    if exclude_unassigned:
-        sa_src = sa_src[sa_src["studio_agent"] != "Unassigned"]
-
     sa = (
-        sa_src.groupby("studio_agent", dropna=False)
+        f.groupby("studio_agent", dropna=False)
         .agg(
             tickets=("ticket_id", "count"),
             avg_studio=("studio_score_pct", "mean"),
             avg_total=("total_qc_pct", "mean"),
             sent_back=("studio_sent_back", "sum"),
-            mistakes=("mistakes_calc", "sum"),
         )
         .reset_index()
         .sort_values(["avg_total", "tickets"], ascending=[True, False])
@@ -776,25 +579,18 @@ with p2:
             "avg_studio": st.column_config.NumberColumn("Avg Studio", format="%.2f%%"),
             "avg_total": st.column_config.NumberColumn("Avg Total", format="%.2f%%"),
             "sent_back": st.column_config.NumberColumn("Sent Back"),
-            "mistakes": st.column_config.NumberColumn("Mistakes (calc)"),
             "low_perf_flag": st.column_config.CheckboxColumn("Low performer (<90%)"),
         },
     )
 
 # ============================================================
-# DEBUG: show why anything became "Other" or why city Unknown
+# DEBUG: show why anything became "Other"
 # ============================================================
 with st.expander("🔎 Debug: subjects that became Other (should be near zero)"):
     other_vals = (
         df[df["ticket_type"] == "Other"]["ticket_type_raw"]
         .fillna("")
         .astype(str)
-        .map(_norm_spaces)
+        .str.strip()
     )
     st.dataframe(other_vals.value_counts().reset_index().head(120), use_container_width=True)
-
-with st.expander("🔎 Debug: why city is Unknown"):
-    unknown_rows = df[df["city"] == "Unknown"].copy()
-    st.write(f"Unknown city rows: {len(unknown_rows):,}")
-    cols = [c for c in ["ticket_id", "ticket_type_raw", "city", "market", "dt"] if c in unknown_rows.columns]
-    st.dataframe(unknown_rows[cols].head(200), use_container_width=True)
