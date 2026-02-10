@@ -307,7 +307,6 @@ def load_clean_df() -> pd.DataFrame:
 # SIDEBAR + LOAD
 # ============================================================
 st.sidebar.markdown("## Data")
-st.sidebar.caption("Auto-loads from Google Sheet (no uploads).")
 
 if st.sidebar.button("🔄 Refresh data now"):
     st.cache_data.clear()
@@ -353,7 +352,7 @@ sel_stu_agents = st.sidebar.multiselect("Studio Agent", stu_agents, default=[])
 ticket_id_search = st.sidebar.text_input("Ticket ID contains", value="")
 
 score_type = st.sidebar.selectbox(
-    "Score Type (Trend + Distribution)",
+    "Score Type",
     ["Total QC Score", "Catalog Agent QC Score", "Studio Agent QC Score", "Ticket Score"],
     index=0,
 )
@@ -397,7 +396,6 @@ left, right = st.columns([0.78, 0.22], vertical_alignment="bottom")
 with left:
     st.markdown('<div class="qc-title">QC Scores Dashboard</div>', unsafe_allow_html=True)
     st.markdown(
-        f'<div class="qc-sub">Cleaned: <b>1 row per ticket</b> • Showing <b>{len(f):,}</b> tickets</div>',
         unsafe_allow_html=True,
     )
 with right:
@@ -431,18 +429,15 @@ with k1: kpi_card("Catalog QC", "—" if catalog_avg is None else f"{catalog_avg
 with k2: kpi_card("Studio QC", "—" if studio_avg is None else f"{studio_avg:.2f}%")
 with k3: kpi_card("Total QC", "—" if total_avg is None else f"{total_avg:.2f}%")
 with k4: kpi_card("Ticket Score", "—" if ticket_avg is None else f"{ticket_avg:.2f}%")
-with k5: kpi_card("Tickets", f"{len(f):,}", f"{low_perf:,} under 90%")
 with k6: kpi_card("Sent Back", f"{sent_back_total:,}")
 
 st.markdown("<br/>", unsafe_allow_html=True)
 
-# ============================================================
-# MAIN: TABLE + TREND
-# ============================================================
+
 a, b = st.columns([0.62, 0.38])
 
 with a:
-    st.markdown("### Tickets (clean)")
+    st.markdown("### Tickets")
     show_cols = [
         "ticket_id", "ticket_type", "ticket_type_raw",
         "catalog_agent", "catalog_score_pct",
@@ -468,7 +463,7 @@ with a:
     )
 
 with b:
-    st.markdown("### Trend")
+    st.markdown("### Score Change")
     t = f.dropna(subset=["dt"]).copy()
     if t.empty:
         st.info("No datetime values available for this filter.")
@@ -487,9 +482,7 @@ with b:
 
 st.markdown("<br/>", unsafe_allow_html=True)
 
-# ============================================================
-# WOW SECTION: DISTRIBUTIONS + SPLITS
-# ============================================================
+
 c1, c2, c3 = st.columns([0.34, 0.33, 0.33])
 
 with c1:
