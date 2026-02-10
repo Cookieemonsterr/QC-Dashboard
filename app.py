@@ -7,51 +7,83 @@ import pandas as pd
 import plotly.express as px
 import streamlit as st
 
-# -------------------------
-# Page config + styling
-# -------------------------
-st.set_page_config(page_title="QC Scores Dashboard (iStep)", page_icon="✅", layout="wide")
+# =========================
+# Page config
+# =========================
+st.set_page_config(
+    page_title="QC Scores Dashboard (iStep)",
+    page_icon="✅",
+    layout="wide",
+    initial_sidebar_state="expanded",
+)
 
+# =========================
+# ✅ CSS that works in LIGHT + DARK
+# (does NOT force white text)
+# =========================
 CUSTOM_CSS = """
 <style>
-:root{
-  --card-bg: rgba(255,255,255,.06);
-  --card-border: rgba(255,255,255,.10);
-  --muted: rgba(255,255,255,.65);
+/* Fix "cut from top" */
+.block-container{ padding-top: 2.2rem !important; }
+
+/* Theme-aware variables (Streamlit sets html[data-theme]) */
+html[data-theme="dark"]{
+  --qc-card-bg: rgba(255,255,255,.06);
+  --qc-card-border: rgba(255,255,255,.12);
+  --qc-muted: rgba(255,255,255,.65);
+  --qc-shadow: 0 10px 25px rgba(0,0,0,.28);
+  --qc-hr: rgba(255,255,255,.10);
 }
-.block-container{ padding-top: 1.2rem; }
-[data-testid="stSidebar"]{ border-right: 1px solid rgba(255,255,255,.08); }
-.qc-title{ font-size: 1.75rem; font-weight: 900; letter-spacing: .2px; line-height: 1.1; margin: .15rem 0 .35rem 0; }
-.qc-sub{ color: var(--muted); margin-top: -.15rem; }
+html[data-theme="light"]{
+  --qc-card-bg: rgba(0,0,0,.03);
+  --qc-card-border: rgba(0,0,0,.10);
+  --qc-muted: rgba(0,0,0,.55);
+  --qc-shadow: 0 10px 25px rgba(0,0,0,.10);
+  --qc-hr: rgba(0,0,0,.08);
+}
+
+.qc-title{
+  font-size: 1.75rem;
+  font-weight: 900;
+  letter-spacing: .2px;
+  line-height: 1.1;
+  margin: .15rem 0 .35rem 0;
+}
+.qc-sub{ color: var(--qc-muted); margin-top: -.15rem; }
+
 .kpi{
-  background: var(--card-bg);
-  border: 1px solid var(--card-border);
+  background: var(--qc-card-bg);
+  border: 1px solid var(--qc-card-border);
   border-radius: 18px;
   padding: 14px 16px;
-  box-shadow: 0 10px 25px rgba(0,0,0,.15);
+  box-shadow: var(--qc-shadow);
 }
-.kpi .label{ font-size: .9rem; color: var(--muted); margin-bottom: 2px; }
+.kpi .label{ font-size: .9rem; color: var(--qc-muted); margin-bottom: 2px; }
 .kpi .value{ font-size: 2.05rem; font-weight: 900; }
-.kpi .delta{ font-size: .9rem; color: var(--muted); }
-hr{ border: none; border-top: 1px solid rgba(255,255,255,.08); margin: .8rem 0; }
+.kpi .delta{ font-size: .9rem; color: var(--qc-muted); }
+
+hr{
+  border: none;
+  border-top: 1px solid var(--qc-hr);
+  margin: .8rem 0;
+}
 </style>
 """
 st.markdown(CUSTOM_CSS, unsafe_allow_html=True)
 
-# -------------------------
+# =========================
 # Header normalization + duplicates
-# -------------------------
+# =========================
 def normalize_header(h: str) -> str:
-    """unescape HTML (&amp; -> &), trim/collapse spaces, apply 'A : B' -> keep B"""
     h = "" if h is None else str(h)
     h = html.unescape(h)
     h = re.sub(r"\s+", " ", h).strip()
+    # If header came like "X : Y" keep Y
     if " : " in h:
         h = h.split(" : ", 1)[1].strip()
     return h
 
 def make_unique(cols):
-    """Keep duplicates but make them unique: City, City__2, City__3..."""
     seen = defaultdict(int)
     out = []
     for c in cols:
@@ -60,57 +92,22 @@ def make_unique(cols):
     return out
 
 def base_col(c: str) -> str:
-    """City__2 -> City (so point rules match duplicates too)"""
     return re.sub(r"__\d+$", "", c)
-
-
-def map_ticket_type(raw: str) -> str:
-    if raw is None:
-        return "Other"
-
-    s = str(raw).strip().lower()
-
-    # normalize common variations
-    s = s.replace("&amp;", "&")
-    s = re.sub(r"\s+", " ", s)
-
-    # treat empty / nan as Other (no Unknown)
-    if s in ("", "nan", "none", "null"):
-        return "Other"
-
-    # ✅ Update tickets
-    if ("outlet" in s and "catalog" in s and "update" in s) or ("outlet" in s and "catalogue" in s and "update" in s):
-        return "Update Tickets"
-    if "outlet catalogue update request" in s or "outlet catalog update request" in s:
-        return "Update Tickets"
-
-    # ✅ Build tickets
-    if "new brand setup" in s:
-        return "Build Tickets"
-    if ("new" in s and "brand" in s and "setup" in s):
-        return "Build Tickets"
-
-    # ✅ Existing tickets
-    if "new outlet setup for existing brand" in s:
-        return "Existing Tickets"
-    if ("new outlet" in s and "existing brand" in s):
-        return "Existing Tickets"
-
-    return "Other"
-
-def _to_pct(series: pd.Series) -> pd.Series:
-    s = pd.to_numeric(series, errors="coerce")
-    if s.dropna().empty:
-        return s
-    if (s.dropna() <= 1.5).mean() > 0.7:
-        s = s * 100
-    return s
 
 def safe_col(df: pd.DataFrame, candidates: list[str]) -> str | None:
     for c in candidates:
         if c in df.columns:
             return c
     return None
+
+def _to_pct(series: pd.Series) -> pd.Series:
+    s = pd.to_numeric(series, errors="coerce")
+    if s.dropna().empty:
+        return s
+    # if values look like 0..1, convert to %
+    if (s.dropna() <= 1.5).mean() > 0.7:
+        s = s * 100
+    return s
 
 def mean_pct(x: pd.Series):
     x = pd.to_numeric(x, errors="coerce")
@@ -123,8 +120,32 @@ def kpi_card(label: str, value: str, delta: str | None = None):
     d += "</div>"
     st.markdown(d, unsafe_allow_html=True)
 
+# =========================
+# ✅ Ticket type mapping (STARTS WITH rules)
+# =========================
+def map_ticket_type(raw: str) -> str:
+    s = "" if raw is None else str(raw)
+    s = s.strip()
+    s_low = s.lower()
+
+    if s_low in ("", "nan", "none", "null"):
+        return "Other"
+
+    if s_low.startswith("outlet catalogue update request"):
+        return "Update Tickets"
+
+    if s_low.startswith("new brand setup (large)") or s_low.startswith("new brand setup (small)"):
+        return "Build Tickets"
+
+    if s_low.startswith("new outlet setup for existing brand"):
+        return "Existing Tickets"
+
+    return "Other"
+
+# =========================
+# ✅ Points per 1 mistake (per ticket type)
+# =========================
 FIELD_POINTS_BUILD = {
-    # Company Details
     "Adding or linking Company Details": 4,
     "Name": 1,
     "Role": 1,
@@ -135,8 +156,6 @@ FIELD_POINTS_BUILD = {
     "TRN": 2,
     "Trade/Commercial License Copy": 1,
     "VAT/Tax Registration Certificate Copy": 1,
-
-    # Company Contracts
     "Contract File Uploaded": 2,
     "Platform, logistic Payments fees": 5,
     "Platform, logistic & Payments fees": 5,
@@ -144,11 +163,7 @@ FIELD_POINTS_BUILD = {
     "Outlet & Contract Type": 2,
     "Contract Date": 1,
     "Bank Details": 5,
-
-    # Brand
     "Brand Name": 2,
-
-    # Outlet Profile
     "Profile Name": 4,
     "Tags": 5,
     "Food Prep Time": 1,
@@ -165,28 +180,20 @@ FIELD_POINTS_BUILD = {
     "Delivery Type & Target acceptance time": 2,
     "Delivery Type & Target Acceptance Time": 2,
     "MIF File Uploaded": 2,
-
-    # Address
     "Location Pin": 8,
     "City": 2,
     "Zone Name & Extensional Zones": 5,
     "Zone Name & Zone Extensions": 5,
     "Zone Name/Zone Extensions": 5,
     "Full Address": 1,
-
-    # Contact
     "Send Delivery Related Info": 2,
     "Priority Numbers For Live Order Issues": 4,
     "Operational Hours": 8,
-
-    # Login
     "Login ID": 2,
     "Select a Role": 1,
 }
 
-# Update Tickets (from your update scorecards + catalogue + studio + location update)
 FIELD_POINTS_UPDATE = {
-    # Update / Catalogue scorecard (same points)
     "Spelling Mistake": 5,
     "profile update": 5,
     "Calories": 3,
@@ -201,16 +208,12 @@ FIELD_POINTS_UPDATE = {
     "Addon Price": 15,
     "Translation": 5,
     "Item Operational Hours": 10,
-
-    # Studio scorecard (images)
     "Hero Image": 30,
     "Image without Text/Price/Code/Logo/Graphics": 15,
     "Image Uploaded to its Proper Item/Images weren't uploaded": 20,
     "Logo Missing": 15,
     "Correct Image Size/Dimensions": 10,
     "Images Pixelated": 10,
-
-    # Update Location scorecard
     "Location Pin": 25,
     "City": 25,
     "Zone Name/Zone Extensions": 25,
@@ -219,12 +222,8 @@ FIELD_POINTS_UPDATE = {
     "Full Address": 25,
 }
 
-# Existing Tickets (Existing company & brand – new outlet + the other existing table)
 FIELD_POINTS_EXISTING = {
-    # Existing: Company Details
     "Adding or linking Company Details": 5,
-
-    # Existing: Outlet Details (profile)
     "Profile Name": 5,
     "Tags": 5,
     "Food Prep Time": 2,
@@ -239,16 +238,12 @@ FIELD_POINTS_EXISTING = {
     "Delivery Type & Target acceptance time": 2,
     "Delivery Type & Target Acceptance Time": 2,
     "MIF File Uploaded": 2,
-
-    # Existing: Address (2nd table)
     "Location Pin": 10,
     "City": 2,
     "Zone Name & Extensional Zones": 7,
     "Zone Name & Zone Extensions": 7,
     "Zone Name/Zone Extensions": 7,
     "Full Address": 2,
-
-    # Existing: Contact
     "Name": 2,
     "Role": 2,
     "Phone Number": 2,
@@ -256,12 +251,8 @@ FIELD_POINTS_EXISTING = {
     "Send Delivery Related Info": 2,
     "Priority Numbers For Live Order Issues": 5,
     "Operational Hours": 9,
-
-    # Existing: Login Credentials
     "Login ID": 2,
     "Select a Role": 2,
-
-    # Existing: Contracts + Brand
     "Contract File Uploaded": 3,
     "Platform, logistic Payments fees": 6,
     "Platform, logistic & Payments fees": 6,
@@ -278,7 +269,7 @@ POINT_MAP_BY_TYPE = {
     "Other": {},
 }
 
-# Buckets (for charts)
+# Buckets for visuals
 BUCKETS_BY_TYPE = {
     "Build Tickets": {
         "Company": [
@@ -286,120 +277,140 @@ BUCKETS_BY_TYPE = {
             "Send Related Info","Certificates Address","TRN",
             "Trade/Commercial License Copy","VAT/Tax Registration Certificate Copy"
         ],
-        "Contracts": ["Contract File Uploaded","Platform, logistic Payments fees","Platform, logistic & Payments fees","Outlet Contract Type","Outlet & Contract Type","Contract Date","Bank Details"],
-        "Profile": ["Brand Name","Profile Name","Tags","Food Prep Time","Order Prep Time","Discovery Radius","Delivery Charge","Minimum Order Value","Price Per Person","Business Type","Direct/AM/Sales POC","Direct/AM/Sales","Outlet Tax Registered","Tax on Commission","Delivery Type & Target acceptance time","Delivery Type & Target Acceptance Time","MIF File Uploaded"],
+        "Contracts": [
+            "Contract File Uploaded","Platform, logistic Payments fees","Platform, logistic & Payments fees",
+            "Outlet Contract Type","Outlet & Contract Type","Contract Date","Bank Details"
+        ],
+        "Profile": [
+            "Brand Name","Profile Name","Tags","Food Prep Time","Order Prep Time","Discovery Radius",
+            "Delivery Charge","Minimum Order Value","Price Per Person","Business Type","Direct/AM/Sales POC",
+            "Direct/AM/Sales","Outlet Tax Registered","Tax on Commission",
+            "Delivery Type & Target acceptance time","Delivery Type & Target Acceptance Time","MIF File Uploaded"
+        ],
         "Address": ["Location Pin","City","Zone Name & Extensional Zones","Zone Name & Zone Extensions","Zone Name/Zone Extensions","Full Address"],
-        "Contact": ["Send Delivery Related Info","Send Delivery Related Info","Priority Numbers For Live Order Issues","Operational Hours"],
+        "Contact": ["Send Delivery Related Info","Priority Numbers For Live Order Issues","Operational Hours"],
         "Login": ["Login ID","Select a Role"],
     },
     "Update Tickets": {
-        "Catalogue / Update": ["Spelling Mistake","profile update","Calories","Categories","Item Name","Missing Items","Missing items","Item Price","Description","Addon (Min :Max)","Addon - Missing/Wrong option name","Addon Price","Translation","Item Operational Hours"],
-        "Studio": ["Hero Image","Image without Text/Price/Code/Logo/Graphics","Image Uploaded to its Proper Item/Images weren't uploaded","Logo Missing","Correct Image Size/Dimensions","Images Pixelated"],
+        "Catalogue / Update": [
+            "Spelling Mistake","profile update","Calories","Categories","Item Name","Missing Items","Missing items",
+            "Item Price","Description","Addon (Min :Max)","Addon - Missing/Wrong option name","Addon Price",
+            "Translation","Item Operational Hours"
+        ],
+        "Studio": [
+            "Hero Image","Image without Text/Price/Code/Logo/Graphics",
+            "Image Uploaded to its Proper Item/Images weren't uploaded","Logo Missing",
+            "Correct Image Size/Dimensions","Images Pixelated"
+        ],
         "Location": ["Location Pin","City","Zone Name/Zone Extensions","Zone Name & Zone Extensions","Zone Name & Extensional Zones","Full Address"],
     },
     "Existing Tickets": {
         "Company": ["Adding or linking Company Details"],
-        "Profile": ["Profile Name","Tags","Food Prep Time","Discovery Radius","Delivery Charge","Minimum Order Value","Price Per Person","Business Type","Direct/AM/Sales POC","Outlet Tax Registered","Tax on Commission","Delivery Type & Target acceptance time","Delivery Type & Target Acceptance Time","MIF File Uploaded"],
+        "Profile": [
+            "Profile Name","Tags","Food Prep Time","Discovery Radius","Delivery Charge","Minimum Order Value",
+            "Price Per Person","Business Type","Direct/AM/Sales POC","Outlet Tax Registered","Tax on Commission",
+            "Delivery Type & Target acceptance time","Delivery Type & Target Acceptance Time","MIF File Uploaded"
+        ],
         "Address": ["Location Pin","City","Zone Name & Extensional Zones","Zone Name & Zone Extensions","Zone Name/Zone Extensions","Full Address"],
         "Contact": ["Name","Role","Phone Number","Email","Send Delivery Related Info","Priority Numbers For Live Order Issues","Operational Hours"],
         "Login": ["Login ID","Select a Role"],
-        "Contracts / Brand": ["Contract File Uploaded","Platform, logistic Payments fees","Platform, logistic & Payments fees","Outlet Contract Type","Outlet & Contract Type","Contract Date","Correct Brand Linked"],
+        "Contracts / Brand": [
+            "Contract File Uploaded","Platform, logistic Payments fees","Platform, logistic & Payments fees",
+            "Outlet Contract Type","Outlet & Contract Type","Contract Date","Correct Brand Linked"
+        ],
     },
     "Other": {},
 }
 
 def compute_mistakes_type_aware(df: pd.DataFrame) -> pd.DataFrame:
-    """
-    For each row:
-      mistakes(field) = points(field) / points_per_1_mistake(field)  (based on ticket_type)
-    """
     out = df.copy()
 
-    # detect point columns (including duplicates)
-    all_point_cols = [c for c in out.columns if base_col(c) in (set(FIELD_POINTS_BUILD) | set(FIELD_POINTS_UPDATE) | set(FIELD_POINTS_EXISTING))]
+    all_known_fields = set(FIELD_POINTS_BUILD) | set(FIELD_POINTS_UPDATE) | set(FIELD_POINTS_EXISTING)
+    all_point_cols = [c for c in out.columns if base_col(c) in all_known_fields]
 
-    # Prepare empty columns
     for c in all_point_cols:
         out[c + " (mistakes)"] = pd.NA
 
     out["Total Deduction Points"] = 0.0
-    out["Total Mistakes"] = 0.0
+    out["Total Mistakes"] = 0
 
-    # bucket columns
     all_bucket_names = set()
-    for t, buckets in BUCKETS_BY_TYPE.items():
+    for _, buckets in BUCKETS_BY_TYPE.items():
         all_bucket_names |= set(buckets.keys())
     for b in sorted(all_bucket_names):
-        out[b + " (mistakes)"] = 0.0
+        out[b + " (mistakes)"] = 0
 
-    # Process per ticket_type (vectorized per group)
     for ttype, subset in out.groupby("ticket_type", dropna=False):
         points_map = POINT_MAP_BY_TYPE.get(ttype, {})
         buckets = BUCKETS_BY_TYPE.get(ttype, {})
-
         idx = subset.index
         if not points_map:
             continue
 
-        # only the point columns relevant for this type
         cols = [c for c in all_point_cols if base_col(c) in points_map]
         if not cols:
             continue
 
         pts = out.loc[idx, cols].apply(pd.to_numeric, errors="coerce").fillna(0)
 
-        # compute mistakes per col
-        mistakes_cols = {}
         for c in cols:
             denom = points_map[base_col(c)]
-            mistakes_cols[c + " (mistakes)"] = (pts[c] / denom).round(0)
+            out.loc[idx, c + " (mistakes)"] = (pts[c] / denom).round(0)
 
-        for mcol, mser in mistakes_cols.items():
-            out.loc[idx, mcol] = mser
-
-        # totals
         out.loc[idx, "Total Deduction Points"] = pts.sum(axis=1)
-        out.loc[idx, "Total Mistakes"] = out.loc[idx, [c + " (mistakes)" for c in cols]].apply(pd.to_numeric, errors="coerce").fillna(0).sum(axis=1)
+        out.loc[idx, "Total Mistakes"] = (
+            out.loc[idx, [c + " (mistakes)" for c in cols]]
+            .apply(pd.to_numeric, errors="coerce")
+            .fillna(0)
+            .sum(axis=1)
+            .round(0)
+        )
 
-        # bucket sums
         for bname, fields in buckets.items():
-            mcols = []
-            for c in cols:
-                if base_col(c) in fields:
-                    mcols.append(c + " (mistakes)")
+            mcols = [c + " (mistakes)" for c in cols if base_col(c) in fields]
             if mcols:
-                out.loc[idx, bname + " (mistakes)"] = out.loc[idx, mcols].apply(pd.to_numeric, errors="coerce").fillna(0).sum(axis=1)
+                out.loc[idx, bname + " (mistakes)"] = (
+                    out.loc[idx, mcols].apply(pd.to_numeric, errors="coerce").fillna(0).sum(axis=1).round(0)
+                )
 
-    # make totals Int-ish
-    out["Total Mistakes"] = pd.to_numeric(out["Total Mistakes"], errors="coerce").fillna(0).round(0).astype("Int64")
+    # cast
+    out["Total Mistakes"] = pd.to_numeric(out["Total Mistakes"], errors="coerce").fillna(0).astype("Int64")
     out["Total Deduction Points"] = pd.to_numeric(out["Total Deduction Points"], errors="coerce").fillna(0)
 
-    # ensure mistake columns are Int64
     for c in all_point_cols:
-        mcol = c + " (mistakes)"
-        out[mcol] = pd.to_numeric(out[mcol], errors="coerce").fillna(0).round(0).astype("Int64")
+        mc = c + " (mistakes)"
+        out[mc] = pd.to_numeric(out[mc], errors="coerce").fillna(0).astype("Int64")
 
     for b in sorted(all_bucket_names):
-        out[b + " (mistakes)"] = pd.to_numeric(out[b + " (mistakes)"], errors="coerce").fillna(0).round(0).astype("Int64")
+        bc = b + " (mistakes)"
+        out[bc] = pd.to_numeric(out[bc], errors="coerce").fillna(0).astype("Int64")
 
     return out
 
-# -------------------------
-# Load data
-# -------------------------
+# =========================
+# ✅ Load data (CSV OR Excel)
+# =========================
 @st.cache_data(show_spinner=False)
-def load_data(xlsx_path: str) -> pd.DataFrame:
-    df = pd.read_excel(xlsx_path, sheet_name=0)
+def load_data(path: str) -> pd.DataFrame:
+    p = str(path).lower()
+
+    if p.endswith(".csv"):
+        # UTF-8-SIG fixes weird BOM headers
+        df = pd.read_csv(path, dtype=str, encoding="utf-8-sig")
+    else:
+        df = pd.read_excel(path, sheet_name=0)
 
     df.columns = [normalize_header(c) for c in df.columns]
     df.columns = make_unique(df.columns)
 
+    # core columns
     col_ticket_id = safe_col(df, ["Ticket ID", "Reference ID"])
-    col_ticket_type_raw = safe_col(df, ["Ticket Type", "Subject"])
-
+    col_subject = safe_col(df, ["Ticket Type", "Subject"])
     col_ticket_score = safe_col(df, ["Ticket Score"])
+
     col_cat_agent = safe_col(df, ["Catalogue Agent Name", "Catalogue Name"])
     col_stu_agent = safe_col(df, ["Studio Agent Name", "Studio Name"])
+
     col_cat_score = safe_col(df, ["Catalogue Agent QC Score", "Catalogue Score"])
     col_stu_score = safe_col(df, ["Studio Agent QC Score", "Studio Score"])
 
@@ -412,16 +423,9 @@ def load_data(xlsx_path: str) -> pd.DataFrame:
     col_city = safe_col(df, ["Catalogue City", "Studio City", "City"])
     col_market = safe_col(df, ["Catalogue Market", "Studio Market", "Market"])
 
-    df["ticket_id"] = (df[col_ticket_id].astype(str) if col_ticket_id else df.index.astype(str))
+    df["ticket_id"] = df[col_ticket_id].astype(str) if col_ticket_id else df.index.astype(str)
 
-    # ✅ Ticket type raw: prefer explicit Ticket Type column if present
-    if "Ticket Type" in df.columns:
-        df["ticket_type_raw"] = df["Ticket Type"].astype(str)
-    elif col_ticket_type_raw:
-        df["ticket_type_raw"] = df[col_ticket_type_raw].astype(str)
-    else:
-        df["ticket_type_raw"] = ""
-
+    df["ticket_type_raw"] = df[col_subject].astype(str) if col_subject else ""
     df["ticket_type"] = df["ticket_type_raw"].apply(map_ticket_type)
 
     df["ticket_score_pct"] = _to_pct(df[col_ticket_score]) if col_ticket_score else pd.NA
@@ -448,34 +452,48 @@ def load_data(xlsx_path: str) -> pd.DataFrame:
 
     df["total_qc_pct"] = df[["catalog_score_pct", "studio_score_pct"]].mean(axis=1, skipna=True)
 
-    # ✅ Mistakes (type-aware)
     df = compute_mistakes_type_aware(df)
-
     return df
 
-# -------------------------
-# App
-# -------------------------
+# =========================
+# Sidebar: Data source + filters
+# =========================
+st.sidebar.markdown("## Data Source")
+
+uploaded = st.sidebar.file_uploader("Upload CSV/Excel", type=["csv", "xlsx", "xls"])
+DEFAULT_PATH = "Istep Data (1).csv"  # <- change this to your real csv filename if different
+
+if uploaded is not None:
+    # streamlit uploaded file object works with pandas directly
+    data_src = uploaded
+    src_name = uploaded.name
+else:
+    data_src = DEFAULT_PATH
+    src_name = DEFAULT_PATH
+
+st.sidebar.caption(f"Using: **{src_name}**")
+
 st.sidebar.markdown("## Filters")
 
-view_mode = st.sidebar.radio(
-    "Ticket Type View",
-    ["All", "Build Tickets", "Update Tickets", "Existing Tickets"],
-    index=0
-)
-
-DATA_PATH = "Istep Data (1).csv"
-df = load_data(DATA_PATH)
+df = load_data(data_src)
 
 min_dt = df["dt"].min()
 max_dt = df["dt"].max()
-
-date_range = st.sidebar.date_input(
-    "Select date range",
-    value=(min_dt.date() if pd.notna(min_dt) else None, max_dt.date() if pd.notna(max_dt) else None),
+default_range = (
+    (min_dt.date() if pd.notna(min_dt) else None),
+    (max_dt.date() if pd.notna(max_dt) else None),
 )
 
-months = sorted([m for m in df["month"].dropna().unique().tolist() if m != "NaT"])
+date_range = st.sidebar.date_input("Select date range", value=default_range)
+
+# ✅ Ticket type view (All / Build / Update / Existing)
+view_mode = st.sidebar.radio(
+    "Ticket Type View",
+    ["All", "Build Tickets", "Update Tickets", "Existing Tickets"],
+    index=0,
+)
+
+months = sorted([m for m in df["month"].dropna().unique().tolist() if m not in ("NaT", "nan")])
 sel_months = st.sidebar.multiselect("Month", months, default=[])
 
 weeks = sorted([int(w) for w in df["week"].dropna().unique().tolist()])
@@ -484,20 +502,17 @@ sel_weeks = st.sidebar.multiselect("Week", weeks, default=[])
 days = [d for d in ["Monday","Tuesday","Wednesday","Thursday","Friday","Saturday","Sunday"] if d in df["day"].dropna().unique()]
 sel_days = st.sidebar.multiselect("Day", days, default=[])
 
-cities = sorted([c for c in df["city"].dropna().unique().tolist() if str(c).strip() and str(c)!="nan"])
+cities = sorted([c for c in df["city"].dropna().unique().tolist() if str(c).strip() and str(c).lower() != "nan"])
 sel_cities = st.sidebar.multiselect("City", cities, default=[])
 
-markets = sorted([m for m in df["market"].dropna().unique().tolist() if str(m).strip() and str(m)!="nan"])
+markets = sorted([m for m in df["market"].dropna().unique().tolist() if str(m).strip() and str(m).lower() != "nan"])
 sel_markets = st.sidebar.multiselect("Market", markets, default=[])
 
-cat_agents = sorted([a for a in df["catalog_agent"].dropna().unique().tolist() if str(a).strip() and str(a)!="nan"])
+cat_agents = sorted([a for a in df["catalog_agent"].dropna().unique().tolist() if str(a).strip() and str(a).lower() != "nan"])
 sel_cat_agents = st.sidebar.multiselect("Catalog Agent name", cat_agents, default=[])
 
-stu_agents = sorted([a for a in df["studio_agent"].dropna().unique().tolist() if str(a).strip() and str(a)!="nan"])
+stu_agents = sorted([a for a in df["studio_agent"].dropna().unique().tolist() if str(a).strip() and str(a).lower() != "nan"])
 sel_stu_agents = st.sidebar.multiselect("Studio Agent Name", stu_agents, default=[])
-
-ticket_types = sorted(df["ticket_type"].dropna().unique().tolist())
-sel_types = st.sidebar.multiselect("Ticket type", ticket_types, default=[])
 
 ticket_id_search = st.sidebar.text_input("Ticket ID contains", value="")
 
@@ -507,10 +522,22 @@ score_type = st.sidebar.selectbox(
     index=0,
 )
 
+score_col = {
+    "Total QC Score": "total_qc_pct",
+    "Catalog Agent QC Score": "catalog_score_pct",
+    "Studio Agent QC Score": "studio_score_pct",
+    "Ticket Score": "ticket_score_pct",
+}[score_type]
+
+# =========================
 # Apply filters
+# =========================
 f = df.copy()
+
+# ✅ Apply ticket type view
 if view_mode != "All":
     f = f[f["ticket_type"] == view_mode]
+
 if isinstance(date_range, tuple) and len(date_range) == 2:
     start, end = date_range
     if start:
@@ -532,21 +559,12 @@ if sel_cat_agents:
     f = f[f["catalog_agent"].isin(sel_cat_agents)]
 if sel_stu_agents:
     f = f[f["studio_agent"].isin(sel_stu_agents)]
-if sel_types:
-    f = f[f["ticket_type"].isin(sel_types)]
 if ticket_id_search.strip():
     f = f[f["ticket_id"].str.contains(ticket_id_search.strip(), case=False, na=False)]
 
-score_col = {
-    "Total QC Score": "total_qc_pct",
-    "Catalog Agent QC Score": "catalog_score_pct",
-    "Studio Agent QC Score": "studio_score_pct",
-    "Ticket Score": "ticket_score_pct",
-}[score_type]
-
-# -------------------------
+# =========================
 # Header
-# -------------------------
+# =========================
 left, right = st.columns([0.78, 0.22], vertical_alignment="bottom")
 with left:
     st.markdown('<div class="qc-title">QC Scores Dashboard</div>', unsafe_allow_html=True)
@@ -562,14 +580,14 @@ with right:
 
 st.markdown("<hr/>", unsafe_allow_html=True)
 
-# -------------------------
+# =========================
 # KPI row
-# -------------------------
+# =========================
 k1, k2, k3, k4, k5, k6 = st.columns([1, 1, 1, 1, 1, 1])
 
 catalog_avg = mean_pct(f["catalog_score_pct"])
-studio_avg  = mean_pct(f["studio_score_pct"])
-total_avg   = mean_pct(f["total_qc_pct"])
+studio_avg = mean_pct(f["studio_score_pct"])
+total_avg = mean_pct(f["total_qc_pct"])
 
 total_tickets = len(f)
 sent_back = int(
@@ -588,9 +606,9 @@ with k6: kpi_card("Total Mistakes", f"{total_mistakes:,}")
 
 st.markdown("<br/>", unsafe_allow_html=True)
 
-# -------------------------
+# =========================
 # Tickets table + trend
-# -------------------------
+# =========================
 a, b = st.columns([0.62, 0.38])
 
 with a:
@@ -619,7 +637,7 @@ with a:
     )
 
 with b:
-    st.markdown("### Score Update")
+    st.markdown("### Trend")
     t = f.dropna(subset=["dt"]).copy()
     if t.empty:
         st.info("No datetime values available in the current filter.")
@@ -642,6 +660,9 @@ with b:
 
 st.markdown("<br/>", unsafe_allow_html=True)
 
+# =========================
+# City count + score distribution + ticket type split
+# =========================
 c1, c2, c3 = st.columns([0.34, 0.33, 0.33])
 
 with c1:
@@ -672,13 +693,14 @@ with c3:
 
 st.markdown("<br/>", unsafe_allow_html=True)
 
-# -------------------------
-# Mistakes Breakdown (type-aware buckets)
-# -------------------------
+# =========================
+# Mistakes Breakdown
+# =========================
 st.markdown("## Mistakes Breakdown")
 
-# Collect all bucket mistake columns that exist
-bucket_cols = [c for c in f.columns if c.endswith(" (mistakes)") and c.replace(" (mistakes)", "") in set().union(*[set(b.keys()) for b in BUCKETS_BY_TYPE.values()])]
+bucket_name_set = set().union(*[set(b.keys()) for b in BUCKETS_BY_TYPE.values()])
+bucket_cols = [c for c in f.columns if c.endswith(" (mistakes)") and c.replace(" (mistakes)", "") in bucket_name_set]
+
 if bucket_cols:
     bucket_totals = f[bucket_cols].sum(numeric_only=True).reset_index()
     bucket_totals.columns = ["bucket", "mistakes"]
@@ -698,7 +720,9 @@ if bucket_cols:
 st.markdown("### Top Mistake Fields (by count)")
 mistake_field_cols = [c for c in f.columns if c.endswith(" (mistakes)") and c not in bucket_cols]
 if mistake_field_cols:
-    field_totals = f[mistake_field_cols].sum(numeric_only=True).sort_values(ascending=False).head(25).reset_index()
+    field_totals = (
+        f[mistake_field_cols].sum(numeric_only=True).sort_values(ascending=False).head(25).reset_index()
+    )
     field_totals.columns = ["field", "mistakes"]
     field_totals["field"] = field_totals["field"].str.replace(" (mistakes)", "", regex=False)
     fig = px.bar(field_totals, x="mistakes", y="field", orientation="h")
@@ -707,9 +731,9 @@ if mistake_field_cols:
 
 st.markdown("<br/>", unsafe_allow_html=True)
 
-# -------------------------
+# =========================
 # Agent performance
-# -------------------------
+# =========================
 st.markdown("## Agent Performance")
 
 p1, p2 = st.columns([0.52, 0.48])
@@ -729,6 +753,7 @@ with p1:
         .sort_values(["avg_total","tickets"], ascending=[True,False])
     )
     ca["low_perf_flag"] = (ca["avg_total"] < 90).fillna(False)
+
     st.dataframe(
         ca,
         use_container_width=True,
@@ -759,6 +784,7 @@ with p2:
         .sort_values(["avg_total","tickets"], ascending=[True,False])
     )
     sa["low_perf_flag"] = (sa["avg_total"] < 90).fillna(False)
+
     st.dataframe(
         sa,
         use_container_width=True,
@@ -773,3 +799,21 @@ with p2:
             "low_perf_flag": st.column_config.CheckboxColumn("Low performer (<90%)"),
         },
     )
+
+st.markdown("<hr/>", unsafe_allow_html=True)
+
+# Optional: show what "Other" actually is (so you can kill it completely)
+with st.expander("🔎 Debug: raw ticket subjects that became Other"):
+    other_vals = (
+        df[df["ticket_type"] == "Other"]["ticket_type_raw"]
+        .fillna("")
+        .astype(str)
+        .str.strip()
+        .replace("nan", "")
+    )
+    st.dataframe(other_vals.value_counts().reset_index().head(50), use_container_width=True)
+
+st.caption(
+    "Now supports CSV or Excel + Light/Dark mode automatically. "
+    "Ticket Type View uses STARTS WITH rules exactly as you described."
+)
