@@ -1,6 +1,9 @@
 # app.py
-# Streamlit QC Dashboard (auto-loads Google Sheet as XLSX, collapses multi-row tickets, light+dark safe UI)
-# Run: streamlit run app.py
+# QC Scores Dashboard (iStep-style) — Auto-load from Google Sheets (no uploads), robust download,
+# collapses multi-row tickets to 1 row per Reference ID, Build/Update/Existing filters, light+dark safe UI.
+#
+# Run locally:  streamlit run app.py
+# Deploy: Streamlit Cloud + requirements.txt (below)
 
 import io
 import re
@@ -13,10 +16,13 @@ import plotly.express as px
 import streamlit as st
 
 # ============================================================
-# ✅ DATA SOURCE (AUTO LOAD FOR EVERYONE)
+# ✅ YOUR GOOGLE SHEET (PUBLIC VIEWER REQUIRED)
 # ============================================================
-DATA_URL = "https://docs.google.com/spreadsheets/d/1WLaQdEDeTB3IibuF0e6NUXe8kdzpILHd/export?format=xlsx"
-# IMPORTANT: The sheet must be Shared as "Anyone with the link" → Viewer
+SHEET_ID = "1rQHlDgQC5mZQ00fPVz20h4KEFbmsosE2"
+
+# Try XLSX first (best), fallback to CSV if Google blocks XLSX export
+XLSX_URL = f"https://docs.google.com/spreadsheets/d/{SHEET_ID}/export?format=xlsx"
+CSV_URL = f"https://docs.google.com/spreadsheets/d/{SHEET_ID}/export?format=csv"
 
 # ============================================================
 # PAGE
@@ -111,7 +117,7 @@ def kpi_card(label: str, value: str, delta: str | None = None):
     st.markdown(d, unsafe_allow_html=True)
 
 # ============================================================
-# ✅ TICKET TYPE RULES (STARTS WITH)
+# ✅ TICKET TYPE RULES (NO UNKNOWN)
 # ============================================================
 def map_ticket_type(raw: str) -> str:
     s = ("" if raw is None else str(raw)).strip()
@@ -119,10 +125,11 @@ def map_ticket_type(raw: str) -> str:
     if low.startswith("outlet catalogue update request"):
         return "Update Tickets"
     if low.startswith("new brand setup"):
+        # covers (large)/(small)
         return "Build Tickets"
     if low.startswith("new outlet setup for existing brand"):
         return "Existing Tickets"
-    return "Other"
+    return "Other"  # Only if the subject truly doesn't match your 3 rules.
 
 # ============================================================
 # ✅ COLLAPSE “SAME TICKET IN MULTIPLE ROWS” → 1 ROW PER TICKET
@@ -151,13 +158,13 @@ def collapse_tickets(df: pd.DataFrame) -> pd.DataFrame:
 
     c_city = safe_col(df, ["Catalogue City", "City"])
     c_market = safe_col(df, ["Catalogue Market", "Market"])
-    c_score = safe_col(df, ["Catalogue Score", "Catalogue Agent QC Score"])
+    c_score = safe_col(df, ["Catalogue Score", "Catalogue Agent QC Score", "Catalogue Agent QC Score__2"])
     c_dt = safe_col(df, ["Catalogue Date & Time", "Ticket Creation Time"])
 
-    s_city = safe_col(df, ["Studio City"])
-    s_market = safe_col(df, ["Studio Market"])
-    s_score = safe_col(df, ["Studio Score", "Studio Agent QC Score"])
-    s_dt = safe_col(df, ["Studio Date & Time"])
+    s_city = safe_col(df, ["Studio City", "City__2"])
+    s_market = safe_col(df, ["Studio Market", "Market__2"])
+    s_score = safe_col(df, ["Studio Score", "Studio Agent QC Score", "Studio Agent QC Score__2"])
+    s_dt = safe_col(df, ["Studio Date & Time", "Ticket Creation Time__2"])
 
     c_sb = safe_col(df, ["Catalogue Sent Back To Catalog", "Sent back to catalog"])
     s_sb = safe_col(df, ["Studio Sent Back To Catalog", "Sent back to catalog__2"])
@@ -169,7 +176,7 @@ def collapse_tickets(df: pd.DataFrame) -> pd.DataFrame:
         if col:
             agg[col] = first_non_empty
 
-    # sent back → sum (so if it appears in multiple rows, you still count it correctly)
+    # sent back → sum
     if c_sb:
         agg[c_sb] = lambda x: pd.to_numeric(x, errors="coerce").fillna(0).sum()
     if s_sb:
@@ -186,18 +193,54 @@ def collapse_tickets(df: pd.DataFrame) -> pd.DataFrame:
     return out
 
 # ============================================================
-# ✅ LOAD DATA (REMOTE GOOGLE SHEET → XLSX)
+# ✅ ROBUST DOWNLOAD (XLSX → CSV) + FRIENDLY ERROR BOX
 # ============================================================
+def _http_get(url: str) -> requests.Response:
+    headers = {
+        "User-Agent": "Mozilla/5.0",
+        "Accept": "*/*",
+    }
+    return requests.get(url, headers=headers, timeout=120, allow_redirects=True)
+
 @st.cache_data(show_spinner=False, ttl=600)
-def load_remote_xlsx(url: str) -> pd.DataFrame:
-    r = requests.get(url, timeout=90)
-    r.raise_for_status()
-    bio = io.BytesIO(r.content)
-    return pd.read_excel(bio, sheet_name=0)
+def load_sheet_df() -> pd.DataFrame:
+    # 1) XLSX
+    r = _http_get(XLSX_URL)
+    if r.status_code == 200 and len(r.content) > 1000:
+        try:
+            return pd.read_excel(io.BytesIO(r.content), sheet_name=0)
+        except Exception:
+            pass  # fallback to CSV
+
+    # 2) CSV
+    r2 = _http_get(CSV_URL)
+    if r2.status_code == 200 and len(r2.content) > 10:
+        return pd.read_csv(io.BytesIO(r2.content))
+
+    # 3) Fail with clear message
+    def preview(resp: requests.Response) -> str:
+        try:
+            txt = resp.text
+            return (txt[:500] + "…") if len(txt) > 500 else txt
+        except Exception:
+            return "<could not decode response text>"
+
+    msg = f"""
+Could not download the Google Sheet.
+
+XLSX_URL status: {r.status_code}
+CSV_URL status:  {r2.status_code}
+
+Fix:
+- Open the sheet → Share → General access → set to "Anyone with the link" (Viewer)
+
+If it’s already public, you might be rate-limited (429). Wait a minute then press Refresh.
+"""
+    raise RuntimeError(msg + "\n\n--- XLSX preview ---\n" + preview(r) + "\n\n--- CSV preview ---\n" + preview(r2))
 
 @st.cache_data(show_spinner=False, ttl=600)
 def load_clean_df() -> pd.DataFrame:
-    df = load_remote_xlsx(DATA_URL)
+    df = load_sheet_df()
 
     # normalize headers + keep duplicates
     df.columns = [normalize_header(c) for c in df.columns]
@@ -210,7 +253,7 @@ def load_clean_df() -> pd.DataFrame:
     df.columns = [normalize_header(c) for c in df.columns]
     df.columns = make_unique(df.columns)
 
-    # map columns
+    # map columns (robust candidates)
     col_ref = safe_col(df, ["Reference ID", "Ticket ID"])
     col_subject = safe_col(df, ["Subject", "Ticket Type"])
     col_ticket_score = safe_col(df, ["Ticket Score"])
@@ -224,8 +267,8 @@ def load_clean_df() -> pd.DataFrame:
     col_cat_sb = safe_col(df, ["Catalogue Sent Back To Catalog", "Sent back to catalog"])
     col_stu_sb = safe_col(df, ["Studio Sent Back To Catalog", "Sent back to catalog__2"])
 
-    col_cat_dt = safe_col(df, ["Ticket Creation Time", "Catalogue Date & Time"])
-    col_stu_dt = safe_col(df, ["Ticket Creation Time__2", "Studio Date & Time"])
+    col_cat_dt = safe_col(df, ["Catalogue Date & Time", "Ticket Creation Time"])
+    col_stu_dt = safe_col(df, ["Studio Date & Time", "Ticket Creation Time__2"])
 
     col_city = safe_col(df, ["Catalogue City", "Studio City", "City"])
     col_market = safe_col(df, ["Catalogue Market", "Studio Market", "Market"])
@@ -261,17 +304,24 @@ def load_clean_df() -> pd.DataFrame:
     return df
 
 # ============================================================
-# SIDEBAR
+# SIDEBAR + LOAD
 # ============================================================
 st.sidebar.markdown("## Data")
 st.sidebar.caption("Auto-loads from Google Sheet (no uploads).")
 
-# refresh button
 if st.sidebar.button("🔄 Refresh data now"):
     st.cache_data.clear()
 
-df = load_clean_df()
+try:
+    df = load_clean_df()
+except Exception as e:
+    st.error("Data download failed.")
+    st.code(str(e))
+    st.stop()
 
+# ============================================================
+# FILTERS
+# ============================================================
 st.sidebar.markdown("## Filters")
 
 view_mode = st.sidebar.radio(
@@ -303,11 +353,10 @@ sel_stu_agents = st.sidebar.multiselect("Studio Agent", stu_agents, default=[])
 ticket_id_search = st.sidebar.text_input("Ticket ID contains", value="")
 
 score_type = st.sidebar.selectbox(
-    "Score Type",
+    "Score Type (Trend + Distribution)",
     ["Total QC Score", "Catalog Agent QC Score", "Studio Agent QC Score", "Ticket Score"],
     index=0,
 )
-
 score_col = {
     "Total QC Score": "total_qc_pct",
     "Catalog Agent QC Score": "catalog_score_pct",
@@ -366,6 +415,7 @@ st.markdown("<hr/>", unsafe_allow_html=True)
 # KPI ROW
 # ============================================================
 k1, k2, k3, k4, k5, k6 = st.columns(6)
+
 catalog_avg = mean_pct(f["catalog_score_pct"])
 studio_avg = mean_pct(f["studio_score_pct"])
 total_avg = mean_pct(f["total_qc_pct"])
@@ -403,6 +453,7 @@ with a:
     ]
     show_cols = [c for c in show_cols if c in f.columns]
     tbl = f[show_cols].sort_values("dt", ascending=False)
+
     st.dataframe(
         tbl,
         use_container_width=True,
@@ -430,8 +481,7 @@ with b:
             .mean(numeric_only=True)
             .sort_values("date_only")
         )
-        ycol = score_col
-        fig = px.line(daily, x="date_only", y=ycol, markers=True)
+        fig = px.line(daily, x="date_only", y=score_col, markers=True)
         fig.update_layout(height=460, margin=dict(l=10, r=10, t=10, b=10), xaxis_title="", yaxis_title="")
         st.plotly_chart(fig, use_container_width=True)
 
@@ -471,7 +521,7 @@ with c3:
 st.markdown("<br/>", unsafe_allow_html=True)
 
 # ============================================================
-# AGENTS (WOW but useful)
+# AGENTS
 # ============================================================
 st.markdown("## Agent Performance")
 
@@ -534,13 +584,13 @@ with p2:
     )
 
 # ============================================================
-# DEBUG (so you can kill "Other" if you want)
+# DEBUG: show why anything became "Other"
 # ============================================================
-with st.expander("🔎 Debug: subjects that became Other"):
+with st.expander("🔎 Debug: subjects that became Other (should be near zero)"):
     other_vals = (
         df[df["ticket_type"] == "Other"]["ticket_type_raw"]
         .fillna("")
         .astype(str)
         .str.strip()
     )
-    st.dataframe(other_vals.value_counts().reset_index().head(60), use_container_width=True)
+    st.dataframe(other_vals.value_counts().reset_index().head(120), use_container_width=True)
