@@ -372,10 +372,13 @@ if ticket_id_search.strip():
 # HEADER
 # ============================================================
 left, right = st.columns([0.78, 0.22], vertical_alignment="bottom")
+
 with left:
-    st.markdown('<div class="qc-title">QC Scores Dashboard</div>', unsafe_allow_html=True)
+    st.markdown(
+        '<div class="qc-title">QC Scores Dashboard</div>',
         unsafe_allow_html=True,
     )
+
 with right:
     st.download_button(
         "⬇️ Download filtered CSV",
@@ -387,9 +390,6 @@ with right:
 
 st.markdown("<hr/>", unsafe_allow_html=True)
 
-# ============================================================
-# KPI ROW (SEPARATE SENT BACKS)
-# ============================================================
 k1, k2, k3, k4, k5, k6 = st.columns(6)
 
 catalog_avg = mean_pct(f["catalog_score_pct"])       # Catalogue Score
