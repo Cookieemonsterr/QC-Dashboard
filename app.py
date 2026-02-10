@@ -1,3 +1,6 @@
+# app.py
+# QC Scores Dashboard (iStep-style) — Auto-load from Google Sheets (no uploads), robust download,
+# collapses multi-row tickets to 1 row per Reference ID, Build/Update/Existing filters, light+dark safe UI.
 
 import io
 import re
@@ -9,14 +12,22 @@ import pandas as pd
 import plotly.express as px
 import streamlit as st
 
+# ============================================================
+# ✅ YOUR GOOGLE SHEET (PUBLIC VIEWER REQUIRED)
+# ============================================================
 SHEET_ID = "1rQHlDgQC5mZQ00fPVz20h4KEFbmsosE2"
 
 XLSX_URL = f"https://docs.google.com/spreadsheets/d/{SHEET_ID}/export?format=xlsx"
-CSV_URL = f"https://docs.google.com/spreadsheets/d/{SHEET_ID}/export?format=csv"
+CSV_URL  = f"https://docs.google.com/spreadsheets/d/{SHEET_ID}/export?format=csv"
 
-
+# ============================================================
+# PAGE
+# ============================================================
 st.set_page_config(page_title="QC Scores Dashboard (iStep)", page_icon="✅", layout="wide")
 
+# ============================================================
+# LIGHT/DARK SAFE UI
+# ============================================================
 CSS = """
 <style>
 .block-container{ padding-top: 2.1rem !important; }
@@ -36,7 +47,7 @@ html[data-theme="light"]{
   --hr: rgba(0,0,0,.08);
 }
 
-.qc-title{ font-size:1.75rem; font-weight:900; letter-spacing:.2px; margin:.1rem 0 .35rem 0; }
+.qc-title{ font-size:1.75rem; font-weight:900; letter-spacing:.2px; margin:.1rem 0 .15rem 0; }
 .qc-sub{ color: var(--muted); margin-top:-.15rem; }
 
 .kpi{
@@ -62,7 +73,6 @@ def normalize_header(h: str) -> str:
     h = "" if h is None else str(h)
     h = html.unescape(h)
     h = re.sub(r"\s+", " ", h).strip()
-    # If header looks like "X : Y" keep Y (your mapping style)
     if " : " in h:
         h = h.split(" : ", 1)[1].strip()
     return h
@@ -81,10 +91,17 @@ def safe_col(df: pd.DataFrame, candidates: list[str]) -> str | None:
             return c
     return None
 
+# ✅ FIXED: handles "100%" properly
 def _to_pct(series: pd.Series) -> pd.Series:
-    s = pd.to_numeric(series, errors="coerce")
+    if series is None:
+        return series
+    s = series.astype(str)
+    s = s.str.replace("%", "", regex=False).str.replace(",", "", regex=False).str.strip()
+    s = pd.to_numeric(s, errors="coerce")
+
     if s.dropna().empty:
         return s
+
     # if values look like 0..1, convert to %
     if (s.dropna() <= 1.5).mean() > 0.7:
         s = s * 100
@@ -102,7 +119,7 @@ def kpi_card(label: str, value: str, delta: str | None = None):
     st.markdown(d, unsafe_allow_html=True)
 
 # ============================================================
-# ✅ TICKET TYPE RULES (NO UNKNOWN)
+# ✅ TICKET TYPE RULES
 # ============================================================
 def map_ticket_type(raw: str) -> str:
     s = ("" if raw is None else str(raw)).strip()
@@ -110,19 +127,13 @@ def map_ticket_type(raw: str) -> str:
     if low.startswith("outlet catalogue update request"):
         return "Update Tickets"
     if low.startswith("new brand setup"):
-        # covers (large)/(small)
         return "Build Tickets"
     if low.startswith("new outlet setup for existing brand"):
         return "Existing Tickets"
-    return "Other"  # Only if the subject truly doesn't match your 3 rules.
+    return "Other"
 
 # ============================================================
-# ✅ COLLAPSE “SAME TICKET IN MULTIPLE ROWS” → 1 ROW PER TICKET
-#   Keeps key metrics correct for your workflow:
-#   - Catalogue Agent(s): unique join
-#   - Studio Agent: first non-empty
-#   - Sent Back columns: sum
-#   - Scores/Date/City/Market/etc: first non-empty
+# ✅ COLLAPSE TO 1 ROW PER TICKET (FIXED FOR YOUR REAL DATA)
 # ============================================================
 def first_non_empty(series: pd.Series):
     s = series.dropna().astype(str).str.strip()
@@ -135,56 +146,48 @@ def unique_join(series: pd.Series, sep=" | "):
     uniq = list(dict.fromkeys(s.tolist()))
     return sep.join(uniq) if uniq else pd.NA
 
+def mean_numeric(series: pd.Series):
+    s = pd.to_numeric(series, errors="coerce")
+    return pd.NA if s.dropna().empty else float(s.mean())
+
+def max_numeric(series: pd.Series):
+    s = pd.to_numeric(series, errors="coerce")
+    return pd.NA if s.dropna().empty else float(s.max())
+
 def collapse_tickets(df: pd.DataFrame) -> pd.DataFrame:
     ref = safe_col(df, ["Reference ID", "Ticket ID"])
     if not ref:
         return df
 
-    # common columns (will vary; candidates handle duplicates)
-    subject = safe_col(df, ["Subject", "Ticket Type"])
-    tscore = safe_col(df, ["Ticket Score"])
+    # Explicit columns (your sheet names)
+    c_agent = safe_col(df, ["Catalogue Name", "Catalogue Agent Name"])
+    s_agent = safe_col(df, ["Studio Name", "Studio Agent Name"])
 
-    c_agent = safe_col(df, ["Catalogue Agent Name", "Catalogue Name"])
-    s_agent = safe_col(df, ["Studio Agent Name", "Studio Name"])
-
-    c_city = safe_col(df, ["Catalogue City", "City"])
-    c_market = safe_col(df, ["Catalogue Market", "Market"])
     c_score = safe_col(df, ["Catalogue Score", "Catalogue Agent QC Score", "Catalogue Agent QC Score__2"])
-    c_dt = safe_col(df, ["Catalogue Date & Time", "Ticket Creation Time"])
-
-    s_city = safe_col(df, ["Studio City", "City__2"])
-    s_market = safe_col(df, ["Studio Market", "Market__2"])
     s_score = safe_col(df, ["Studio Score", "Studio Agent QC Score", "Studio Agent QC Score__2"])
-    s_dt = safe_col(df, ["Studio Date & Time", "Ticket Creation Time__2"])
+    t_score = safe_col(df, ["Ticket Score"])
 
     c_sb = safe_col(df, ["Catalogue Sent Back To Catalog", "Sent back to catalog"])
     s_sb = safe_col(df, ["Studio Sent Back To Catalog", "Sent back to catalog__2"])
 
     agg = {}
 
-    # 1-value fields → take first non-empty
-    for col in [subject, tscore, c_city, c_market, c_score, c_dt, s_city, s_market, s_score, s_dt]:
-        if col:
-            agg[col] = first_non_empty
+    # Agents
+    if c_agent: agg[c_agent] = unique_join
+    if s_agent: agg[s_agent] = first_non_empty  # only one studio agent
 
-    # sent back → sum (separately!)
-    if c_sb:
-        agg[c_sb] = lambda x: pd.to_numeric(x, errors="coerce").fillna(0).sum()
-    if s_sb:
-        agg[s_sb] = lambda x: pd.to_numeric(x, errors="coerce").fillna(0).sum()
+    # Scores
+    if c_score: agg[c_score] = mean_numeric      # many catalogue rows → average
+    if s_score: agg[s_score] = first_non_empty   # usually only one row has it
+    if t_score: agg[t_score] = first_non_empty   # ticket-level
 
-    # multi-people fields → collect unique
-    if c_agent:
-        agg[c_agent] = unique_join
-    if s_agent:
-        agg[s_agent] = first_non_empty  # studio should be one person
+    # ✅ Sent back is duplicated in catalogue rows → use MAX (NOT SUM)
+    if c_sb: agg[c_sb] = max_numeric
+    if s_sb: agg[s_sb] = max_numeric
 
-    # If we have other columns you want preserved, keep first non-empty by default
-    # (This avoids losing details when there are many rows per ticket.)
+    # Everything else: keep first real value so details don’t disappear
     for col in df.columns:
-        if col == ref:
-            continue
-        if col in agg:
+        if col == ref or col in agg:
             continue
         agg[col] = first_non_empty
 
@@ -193,50 +196,29 @@ def collapse_tickets(df: pd.DataFrame) -> pd.DataFrame:
     return out
 
 # ============================================================
-# ✅ ROBUST DOWNLOAD (XLSX → CSV) + FRIENDLY ERROR BOX
+# ✅ ROBUST DOWNLOAD
 # ============================================================
 def _http_get(url: str) -> requests.Response:
-    headers = {
-        "User-Agent": "Mozilla/5.0",
-        "Accept": "*/*",
-    }
+    headers = {"User-Agent": "Mozilla/5.0", "Accept": "*/*"}
     return requests.get(url, headers=headers, timeout=120, allow_redirects=True)
 
 @st.cache_data(show_spinner=False, ttl=600)
 def load_sheet_df() -> pd.DataFrame:
-    # 1) XLSX
     r = _http_get(XLSX_URL)
     if r.status_code == 200 and len(r.content) > 1000:
         try:
             return pd.read_excel(io.BytesIO(r.content), sheet_name=0)
         except Exception:
-            pass  # fallback to CSV
+            pass
 
-    # 2) CSV
     r2 = _http_get(CSV_URL)
     if r2.status_code == 200 and len(r2.content) > 10:
         return pd.read_csv(io.BytesIO(r2.content))
 
-    # 3) Fail with clear message
-    def preview(resp: requests.Response) -> str:
-        try:
-            txt = resp.text
-            return (txt[:500] + "…") if len(txt) > 500 else txt
-        except Exception:
-            return "<could not decode response text>"
-
-    msg = f"""
-Could not download the Google Sheet.
-
-XLSX_URL status: {r.status_code}
-CSV_URL status:  {r2.status_code}
-
-Fix:
-- Open the sheet → Share → General access → set to "Anyone with the link" (Viewer)
-
-If it’s already public, you might be rate-limited (429). Wait a minute then press Refresh.
-"""
-    raise RuntimeError(msg + "\n\n--- XLSX preview ---\n" + preview(r) + "\n\n--- CSV preview ---\n" + preview(r2))
+    raise RuntimeError(
+        f"Could not download sheet. XLSX={r.status_code} CSV={r2.status_code}. "
+        "Make sure sharing is 'Anyone with the link (Viewer)'."
+    )
 
 @st.cache_data(show_spinner=False, ttl=600)
 def load_clean_df() -> pd.DataFrame:
@@ -253,35 +235,30 @@ def load_clean_df() -> pd.DataFrame:
     df.columns = [normalize_header(c) for c in df.columns]
     df.columns = make_unique(df.columns)
 
-    # map columns (robust candidates)
     col_ref = safe_col(df, ["Reference ID", "Ticket ID"])
     col_subject = safe_col(df, ["Subject", "Ticket Type"])
+
     col_ticket_score = safe_col(df, ["Ticket Score"])
-
-    # IMPORTANT: per your rule names
-    col_cat_agent = safe_col(df, ["Catalogue Agent Name", "Catalogue Name"])
-    col_stu_agent = safe_col(df, ["Studio Agent Name", "Studio Name"])
-
     col_cat_score = safe_col(df, ["Catalogue Score", "Catalogue Agent QC Score"])
     col_stu_score = safe_col(df, ["Studio Score", "Studio Agent QC Score"])
 
-    # IMPORTANT: separate sent back sources
+    col_cat_agent = safe_col(df, ["Catalogue Name", "Catalogue Agent Name"])
+    col_stu_agent = safe_col(df, ["Studio Name", "Studio Agent Name"])
+
     col_cat_sb = safe_col(df, ["Catalogue Sent Back To Catalog", "Sent back to catalog"])
     col_stu_sb = safe_col(df, ["Studio Sent Back To Catalog", "Sent back to catalog__2"])
 
     col_cat_dt = safe_col(df, ["Catalogue Date & Time", "Ticket Creation Time"])
     col_stu_dt = safe_col(df, ["Studio Date & Time", "Ticket Creation Time__2"])
 
-    # City/Market candidates incl __2
     col_city = safe_col(df, ["Catalogue City", "Studio City", "City", "City__2"])
     col_market = safe_col(df, ["Catalogue Market", "Studio Market", "Market", "Market__2"])
 
-    # standardized columns used by dashboard
     df["ticket_id"] = df[col_ref].astype(str) if col_ref else df.index.astype(str)
     df["ticket_type_raw"] = df[col_subject].astype(str) if col_subject else ""
     df["ticket_type"] = df["ticket_type_raw"].apply(map_ticket_type)
 
-    # Scores
+    # Scores (fixed parsing)
     df["ticket_score_pct"] = _to_pct(df[col_ticket_score]) if col_ticket_score else pd.NA
     df["catalog_score_pct"] = _to_pct(df[col_cat_score]) if col_cat_score else pd.NA
     df["studio_score_pct"] = _to_pct(df[col_stu_score]) if col_stu_score else pd.NA
@@ -290,9 +267,9 @@ def load_clean_df() -> pd.DataFrame:
     df["catalog_agent"] = df[col_cat_agent] if col_cat_agent else pd.NA
     df["studio_agent"] = df[col_stu_agent] if col_stu_agent else pd.NA
 
-    # Sent back (keep separate!)
+    # Sent back (now correct because collapse used MAX)
     df["catalog_sent_back"] = pd.to_numeric(df[col_cat_sb], errors="coerce").fillna(0) if col_cat_sb else 0
-    df["studio_sent_back"] = pd.to_numeric(df[col_stu_sb], errors="coerce").fillna(0) if col_stu_sb else 0
+    df["studio_sent_back"]  = pd.to_numeric(df[col_stu_sb], errors="coerce").fillna(0) if col_stu_sb else 0
 
     # City/Market
     df["city"] = df[col_city] if col_city else pd.NA
@@ -303,10 +280,6 @@ def load_clean_df() -> pd.DataFrame:
     stu_dt = pd.to_datetime(df[col_stu_dt], errors="coerce") if col_stu_dt else pd.NaT
     df["dt"] = cat_dt.fillna(stu_dt)
 
-    # If most datetimes fail, warn (prevents “empty dashboard panic”)
-    if df["dt"].notna().mean() < 0.2:
-        st.warning("Most Date & Time values could not be parsed. Check sheet datetime formats.")
-
     df["date"] = df["dt"].dt.date
     df["month"] = df["dt"].dt.to_period("M").astype(str)
     df["week"] = df["dt"].dt.isocalendar().week.astype("Int64")
@@ -314,12 +287,9 @@ def load_clean_df() -> pd.DataFrame:
 
     # ✅ YOUR RULES:
     # Catalog QC = Catalogue Score
-    # Studio QC = Studio Score
-    # Total QC = Ticket Score
+    # Studio QC  = Studio Score
+    # Total QC   = Ticket Score
     df["total_qc_pct"] = df["ticket_score_pct"]
-
-    # Optional: keep combined metric if you ever want it later
-    df["combined_qc_pct"] = df[["catalog_score_pct", "studio_score_pct"]].mean(axis=1, skipna=True)
 
     return df
 
@@ -327,7 +297,6 @@ def load_clean_df() -> pd.DataFrame:
 # SIDEBAR + LOAD
 # ============================================================
 st.sidebar.markdown("## Data")
-
 if st.sidebar.button("🔄 Refresh data now"):
     st.cache_data.clear()
 
@@ -371,7 +340,6 @@ sel_stu_agents = st.sidebar.multiselect("Studio Agent", stu_agents, default=[])
 
 ticket_id_search = st.sidebar.text_input("Ticket ID contains", value="")
 
-# ✅ Make score selection match your definitions clearly
 score_type = st.sidebar.selectbox(
     "Score Type",
     ["Ticket Score (Total QC)", "Catalogue Score", "Studio Score"],
@@ -415,6 +383,10 @@ if ticket_id_search.strip():
 left, right = st.columns([0.78, 0.22], vertical_alignment="bottom")
 with left:
     st.markdown('<div class="qc-title">QC Scores Dashboard</div>', unsafe_allow_html=True)
+    st.markdown(
+        '<div class="qc-sub">Catalog QC = Catalogue Score • Studio QC = Studio Score • Total QC = Ticket Score</div>',
+        unsafe_allow_html=True,
+    )
 with right:
     st.download_button(
         "⬇️ Download filtered CSV",
@@ -427,28 +399,29 @@ with right:
 st.markdown("<hr/>", unsafe_allow_html=True)
 
 # ============================================================
-# KPI ROW (FIXED + SEPARATE SENT BACK)
+# KPI ROW (SEPARATE SENT BACKS)
 # ============================================================
 k1, k2, k3, k4, k5, k6 = st.columns(6)
 
-catalog_avg = mean_pct(f["catalog_score_pct"])     # Catalogue Score
-studio_avg = mean_pct(f["studio_score_pct"])       # Studio Score
-total_avg = mean_pct(f["ticket_score_pct"])        # Ticket Score = Total QC
+catalog_avg = mean_pct(f["catalog_score_pct"])       # Catalogue Score
+studio_avg  = mean_pct(f["studio_score_pct"])        # Studio Score
+total_avg   = mean_pct(f["ticket_score_pct"])        # Ticket Score = Total QC
 
 sent_back_catalog = int(pd.to_numeric(f["catalog_sent_back"], errors="coerce").fillna(0).sum())
-sent_back_studio = int(pd.to_numeric(f["studio_sent_back"], errors="coerce").fillna(0).sum())
+sent_back_studio  = int(pd.to_numeric(f["studio_sent_back"], errors="coerce").fillna(0).sum())
 low_perf = int((pd.to_numeric(f["ticket_score_pct"], errors="coerce") < 90).fillna(False).sum())
 
 with k1: kpi_card("Catalog QC", "—" if catalog_avg is None else f"{catalog_avg:.2f}%")
 with k2: kpi_card("Studio QC", "—" if studio_avg is None else f"{studio_avg:.2f}%")
 with k3: kpi_card("Total QC (Ticket)", "—" if total_avg is None else f"{total_avg:.2f}%")
-with k4: kpi_card("Sent Back → Catalog", f"{sent_back_catalog:,}")
-with k5: kpi_card("Sent Back → Studio", f"{sent_back_studio:,}")
+with k4: kpi_card("Low performers (<90%)", f"{low_perf:,}")
+with k5: kpi_card("Sent Back → Catalog", f"{sent_back_catalog:,}")
+with k6: kpi_card("Sent Back → Studio", f"{sent_back_studio:,}")
 
 st.markdown("<br/>", unsafe_allow_html=True)
 
 # ============================================================
-# MAIN TABLE + SCORE CHANGE
+# TABLE + CHARTS
 # ============================================================
 a, b = st.columns([0.62, 0.38])
 
@@ -458,7 +431,7 @@ with a:
         "ticket_id", "ticket_type", "ticket_type_raw",
         "catalog_agent", "catalog_score_pct",
         "studio_agent", "studio_score_pct",
-        "ticket_score_pct",  # ticket score is the total QC in your definition
+        "ticket_score_pct",
         "city", "market", "dt",
         "catalog_sent_back", "studio_sent_back",
     ]
@@ -497,9 +470,6 @@ with b:
 
 st.markdown("<br/>", unsafe_allow_html=True)
 
-# ============================================================
-# CHARTS
-# ============================================================
 c1, c2, c3 = st.columns([0.34, 0.33, 0.33])
 
 with c1:
@@ -522,7 +492,6 @@ with c2:
 
 with c3:
     st.markdown("### Tickets by City")
-    # ✅ Exclude Unknown cleanly (no “Unknown” in chart)
     city_counts = (
         f["city"]
         .dropna()
@@ -556,9 +525,9 @@ with p1:
         f.groupby("catalog_agent", dropna=False)
         .agg(
             tickets=("ticket_id", "count"),
-            avg_catalog=("catalog_score_pct", "mean"),       # Catalogue Score
-            avg_ticket=("ticket_score_pct", "mean"),         # Ticket Score (Total QC)
-            sent_back=("catalog_sent_back", "sum"),          # Sent back to catalog
+            avg_catalog=("catalog_score_pct", "mean"),
+            avg_ticket=("ticket_score_pct", "mean"),
+            sent_back=("catalog_sent_back", "sum"),
         )
         .reset_index()
         .sort_values(["avg_ticket", "tickets"], ascending=[True, False])
@@ -569,7 +538,7 @@ with p1:
         use_container_width=True,
         height=360,
         column_config={
-            "catalog_agent": st.column_config.TextColumn("Catalogue Agent"),
+            "catalog_agent": st.column_config.TextColumn("Catalogue Agent(s)"),
             "tickets": st.column_config.NumberColumn("Tickets"),
             "avg_catalog": st.column_config.NumberColumn("Avg Catalogue Score", format="%.2f%%"),
             "avg_ticket": st.column_config.NumberColumn("Avg Ticket Score (Total QC)", format="%.2f%%"),
@@ -584,9 +553,9 @@ with p2:
         f.groupby("studio_agent", dropna=False)
         .agg(
             tickets=("ticket_id", "count"),
-            avg_studio=("studio_score_pct", "mean"),         # Studio Score
-            avg_ticket=("ticket_score_pct", "mean"),         # Ticket Score (Total QC)
-            sent_back=("studio_sent_back", "sum"),           # Sent back to studio
+            avg_studio=("studio_score_pct", "mean"),
+            avg_ticket=("ticket_score_pct", "mean"),
+            sent_back=("studio_sent_back", "sum"),
         )
         .reset_index()
         .sort_values(["avg_ticket", "tickets"], ascending=[True, False])
@@ -605,3 +574,12 @@ with p2:
             "low_perf_flag": st.column_config.CheckboxColumn("Low performer (<90%)"),
         },
     )
+
+with st.expander("🔎 Debug: subjects that became Other (should be near zero)"):
+    other_vals = (
+        df[df["ticket_type"] == "Other"]["ticket_type_raw"]
+        .fillna("")
+        .astype(str)
+        .str.strip()
+    )
+    st.dataframe(other_vals.value_counts().reset_index().head(120), use_container_width=True)
