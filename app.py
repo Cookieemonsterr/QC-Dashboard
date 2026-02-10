@@ -374,7 +374,6 @@ if ticket_id_search.strip():
 left, right = st.columns([0.78, 0.22], vertical_alignment="bottom")
 with left:
     st.markdown('<div class="qc-title">QC Scores Dashboard</div>', unsafe_allow_html=True)
-    st.markdown(
         unsafe_allow_html=True,
     )
 with right:
