@@ -464,7 +464,7 @@ view_mode = st.sidebar.radio(
     index=0
 )
 
-DATA_PATH = "Istep Data (1).xlsx"
+DATA_PATH = "Istep Data (1).csv"
 df = load_data(DATA_PATH)
 
 min_dt = df["dt"].min()
