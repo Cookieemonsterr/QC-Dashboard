@@ -409,11 +409,29 @@ with b:
         st.info("No datetime values available for this filter.")
     else:
         t["date_only"] = t["dt"].dt.date
-        daily = (
-            t.groupby("date_only", as_index=False)[["catalog_score_pct", "studio_score_pct", "ticket_score_pct"]]
-            .mean(numeric_only=True)
-            .sort_values("date_only")
-        )
-        fig = px.line(daily, x="date_only", y=score_col, markers=True)
-        fig.update_layout(height=460, margin=dict(l=10, r=10, t=10, b=10), xaxis_title="", yaxis_title="")
-        st.plotly_chart(fig, use_container_width=True)
+
+        # only keep numeric score columns that exist
+        score_cols_all = ["catalog_score_pct", "studio_score_pct", "ticket_score_pct"]
+        score_cols_present = [c for c in score_cols_all if c in t.columns]
+
+        if not score_cols_present:
+            st.info("No score columns available for this filter.")
+        else:
+            daily = (
+                t.groupby("date_only", as_index=False)[score_cols_present]
+                .mean(numeric_only=True)
+                .sort_values("date_only")
+            )
+
+            # if selected score column isn't available, fallback to first available
+            ycol = score_col if score_col in daily.columns else score_cols_present[0]
+
+            # if all values are NaN, show message
+            if pd.to_numeric(daily[ycol], errors="coerce").dropna().empty:
+                st.info("No values available to plot for this score type.")
+            else:
+                fig = px.line(daily, x="date_only", y=ycol, markers=True)
+                fig.update_layout(height=460, margin=dict(l=10, r=10, t=10, b=10),
+                                  xaxis_title="", yaxis_title="")
+                st.plotly_chart(fig, use_container_width=True)
+
