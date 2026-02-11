@@ -508,10 +508,3 @@ with c3:
     fig.update_layout(height=320, margin=dict(l=10, r=10, t=10, b=10), xaxis_title="", yaxis_title="")
     st.plotly_chart(fig, use_container_width=True)
 
-# ============================================================
-# DEBUG (optional but helpful)
-# ============================================================
-with st.expander("🧪 Debug: show filtered score rows (this is what your sheet AVG is averaging)"):
-    show_cols = ["ticket_id", "ticket_type", "form_name", "score_pct", "dt", "agent_name", "agent_uid", "city", "market", "sent_back"]
-    show_cols = [c for c in show_cols if c in rf.columns]
-    st.dataframe(rf[show_cols].sort_values("dt", ascending=False), use_container_width=True, height=420)
