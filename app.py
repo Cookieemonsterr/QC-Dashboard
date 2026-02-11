@@ -1,29 +1,13 @@
-# app.py — QC Scores Dashboard (iStep)
-# Repo files:
-#   - Istep Data (1).xls
-#   - Evaluation Report Istep - Report.csv
-#
-# Logic:
-# - Ticket type from Subject (Build/Update/Existing)
-# - Scores & Sent Back from Report CSV (cards)
-# - De-dupe duplicates within same ticket/card/agent
-# - Total QC = Ticket Score (main card by ticket type)
-# - Catalogue QC = relevant update/build/existing catalogue-side cards
-# - Studio QC = Studio scorecard + Images Update
 
 import re
 import html
 import time
 from collections import defaultdict
-
 import pandas as pd
 import plotly.express as px
 import streamlit as st
 
-# ============================================================
-# ✅ FILES IN REPO (same folder as app.py)
-# ============================================================
-BASE_PATH = "Istep Data (1).xls"
+BASE_PATH = "istep_data.csv"
 REPORT_PATH = "Evaluation Report Istep - Report.csv"
 
 # ============================================================
