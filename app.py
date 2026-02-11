@@ -1,9 +1,7 @@
-
 import re
 import html
 import time
 from collections import defaultdict
-
 import pandas as pd
 import plotly.express as px
 import streamlit as st
@@ -64,7 +62,7 @@ def make_unique(cols):
         out.append(c if seen[c] == 1 else f"{c}__{seen[c]}")
     return out
 
-def safe_col(df: pd.DataFrame, candidates: list[str]) -> str | None:
+def safe_col(df: pd.DataFrame, candidates: list[str]):
     for c in candidates:
         if c in df.columns:
             return c
@@ -157,13 +155,15 @@ EXISTING_MAIN_FORMS = {
     "Existing Company - New Brand and New outlet",
 }
 
-def bucket_for_row(ticket_type: str, form_name: str) -> str | None:
+def bucket_for_row(ticket_type: str, form_name: str):
     tt = (ticket_type or "").strip()
     fn = (form_name or "").strip()
 
+    # Studio KPI bucket
     if fn in STUDIO_FORMS:
         return "Studio"
 
+    # Total KPI bucket (KEEP AS YOU HAVE IT)
     if (tt == "Build Tickets") and (fn in BUILD_MAIN_FORMS):
         return "Total"
     if (tt == "Update Tickets") and (fn == "Update scorecard"):
@@ -171,6 +171,7 @@ def bucket_for_row(ticket_type: str, form_name: str) -> str | None:
     if (tt == "Existing Tickets") and (fn in EXISTING_MAIN_FORMS):
         return "Total"
 
+    # Catalogue bucket (still used for some tables; but KPI Catalog QC will be NON-STUDIO)
     if (tt == "Update Tickets") and (fn in UPDATE_FORMS):
         return "Catalogue"
     if tt in {"Build Tickets", "Existing Tickets"} and (
@@ -180,7 +181,9 @@ def bucket_for_row(ticket_type: str, form_name: str) -> str | None:
 
     return None
 
-
+# ============================================================
+# DATA
+# ============================================================
 st.sidebar.markdown("## Data")
 if st.sidebar.button("Refresh data now"):
     st.cache_data.clear()
@@ -232,19 +235,47 @@ def load_data():
     ref_to_type = dict(zip(overall["__ref__"], overall["ticket_type"]))
     ev["ticket_type"] = ev["__ref__"].map(ref_to_type).fillna("Other")
 
-    # bucket rows for KPIs
+    # bucket rows (for Studio + Total; Catalogue bucket still exists)
     ev["bucket"] = ev.apply(lambda r: bucket_for_row(r["ticket_type"], r["form_name"]), axis=1)
+
+    # ✅ IMPORTANT: define Studio vs Non-Studio exactly
+    ev["is_studio"] = ev["form_name"].isin(STUDIO_FORMS)
+    ev["is_non_studio"] = ~ev["is_studio"]
 
     # join overall fields to eval rows (so City/Market/Agent filters work)
     rows = ev.merge(overall, on="__ref__", how="left", suffixes=("", "_overall"))
 
-    # Ticket-level table (display only)
-    per_cat = rows[rows["bucket"] == "Catalogue"].groupby("__ref__", as_index=False)["score_pct"].mean().rename(columns={"score_pct": "catalog_qc"})
-    per_stu = rows[rows["bucket"] == "Studio"].groupby("__ref__", as_index=False)["score_pct"].mean().rename(columns={"score_pct": "studio_qc"})
-    per_tot = rows[rows["bucket"] == "Total"].groupby("__ref__", as_index=False)["score_pct"].mean().rename(columns={"score_pct": "total_qc"})
+    # Ticket-level table scores
+    # ✅ Catalog QC per ticket = mean of ALL NON-STUDIO rows for that ticket
+    per_cat = (
+        rows[rows["is_non_studio"]]
+        .groupby("__ref__", as_index=False)["score_pct"]
+        .mean()
+        .rename(columns={"score_pct": "catalog_qc"})
+    )
 
-    # Count sent-back events per ticket for table only (we'll compute KPIs as unique tickets later)
-    sent_back_cat_events = rows.groupby("__ref__", as_index=False)["sent_back_catalog"].sum().rename(columns={"sent_back_catalog": "sent_back_to_catalog_events"})
+    # Studio per ticket stays studio-only
+    per_stu = (
+        rows[rows["is_studio"]]
+        .groupby("__ref__", as_index=False)["score_pct"]
+        .mean()
+        .rename(columns={"score_pct": "studio_qc"})
+    )
+
+    # Total per ticket stays EXACTLY your Total bucket (unchanged)
+    per_tot = (
+        rows[rows["bucket"] == "Total"]
+        .groupby("__ref__", as_index=False)["score_pct"]
+        .mean()
+        .rename(columns={"score_pct": "total_qc"})
+    )
+
+    # Sent-back events per ticket (display only)
+    sent_back_cat_events = (
+        rows.groupby("__ref__", as_index=False)["sent_back_catalog"]
+        .sum()
+        .rename(columns={"sent_back_catalog": "sent_back_to_catalog_events"})
+    )
 
     tickets = (
         overall.merge(sent_back_cat_events, on="__ref__", how="left")
@@ -254,7 +285,9 @@ def load_data():
     )
 
     tickets["ticket_id"] = tickets["Reference ID"].astype(str)
-    tickets["sent_back_to_catalog_events"] = pd.to_numeric(tickets["sent_back_to_catalog_events"], errors="coerce").fillna(0).astype(int)
+    tickets["sent_back_to_catalog_events"] = pd.to_numeric(
+        tickets["sent_back_to_catalog_events"], errors="coerce"
+    ).fillna(0).astype(int)
 
     return rows, tickets
 
@@ -266,7 +299,9 @@ st.caption(f"Loaded in {time.time()-t0:.2f}s")
 
 st.sidebar.markdown("## Filters")
 
-ticket_view = st.sidebar.radio("Ticket Type View", ["All", "Build Tickets", "Update Tickets", "Existing Tickets"], index=0)
+ticket_view = st.sidebar.radio(
+    "Ticket Type View", ["All", "Build Tickets", "Update Tickets", "Existing Tickets"], index=0
+)
 
 min_dt = rows_df["dt"].min()
 max_dt = rows_df["dt"].max()
@@ -326,8 +361,13 @@ st.markdown("<hr/>", unsafe_allow_html=True)
 
 k1, k2, k3, k4, k5 = st.columns(5)
 
-cat_rows = rf[rf["bucket"] == "Catalogue"].copy()
-stu_rows = rf[rf["bucket"] == "Studio"].copy()
+# ✅ Catalog QC rows = ALL NON-STUDIO rows
+cat_rows = rf[rf["is_non_studio"]].copy()
+
+# Studio rows unchanged
+stu_rows = rf[rf["is_studio"]].copy()
+
+# Total rows unchanged (as you asked)
 tot_rows = rf[rf["bucket"] == "Total"].copy()
 
 cat_avg = mean_pct(cat_rows["score_pct"])
@@ -409,7 +449,6 @@ cat_summary = (
     .agg(
         avg_score=("score_pct", "mean"),
         tickets=("__ref__", "nunique"),
-        sent_back_tickets=("__ref__", lambda s: (cat_rows.loc[s.index].groupby("__ref__")["sent_back_catalog"].max().fillna(0).gt(0)).any().sum()),
     )
     .sort_values(["avg_score", "tickets"], ascending=[False, False])
 )
@@ -418,9 +457,7 @@ st.dataframe(
     cat_summary,
     use_container_width=True,
     height=420,
-    column_config={
-        "avg_score": st.column_config.NumberColumn("Avg Score", format="%.2f%%"),
-    },
+    column_config={"avg_score": st.column_config.NumberColumn("Avg Score", format="%.2f%%")},
 )
 
 st.markdown("## Studio QC — Avg Score by Market & Studio Agent")
@@ -430,7 +467,6 @@ stu_summary = (
     .agg(
         avg_score=("score_pct", "mean"),
         tickets=("__ref__", "nunique"),
-        sent_back_tickets=("__ref__", lambda s: (stu_rows.loc[s.index].groupby("__ref__")["sent_back_catalog"].max().fillna(0).gt(0)).any().sum()),
     )
     .sort_values(["avg_score", "tickets"], ascending=[False, False])
 )
@@ -439,7 +475,5 @@ st.dataframe(
     stu_summary,
     use_container_width=True,
     height=420,
-    column_config={
-        "avg_score": st.column_config.NumberColumn("Avg Score", format="%.2f%%"),
-    },
+    column_config={"avg_score": st.column_config.NumberColumn("Avg Score", format="%.2f%%")},
 )
