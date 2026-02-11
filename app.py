@@ -405,17 +405,18 @@ with a:
 with b:
     st.markdown("### Score Change")
     t = f.dropna(subset=["dt"]).copy()
+
     if t.empty:
         st.info("No datetime values available for this filter.")
     else:
-        t["date_only"] = t["dt"].dt.date
+        t["date_only"] = pd.to_datetime(t["dt"], errors="coerce").dt.date
+        t = t.dropna(subset=["date_only"])
 
-        # only keep numeric score columns that exist
         score_cols_all = ["catalog_score_pct", "studio_score_pct", "ticket_score_pct"]
         score_cols_present = [c for c in score_cols_all if c in t.columns]
 
         if not score_cols_present:
-            st.info("No score columns available for this filter.")
+            st.info("No score columns available.")
         else:
             daily = (
                 t.groupby("date_only", as_index=False)[score_cols_present]
@@ -423,15 +424,22 @@ with b:
                 .sort_values("date_only")
             )
 
-            # if selected score column isn't available, fallback to first available
+            # choose y column safely
             ycol = score_col if score_col in daily.columns else score_cols_present[0]
 
-            # if all values are NaN, show message
-            if pd.to_numeric(daily[ycol], errors="coerce").dropna().empty:
-                st.info("No values available to plot for this score type.")
+            # if still missing somehow, stop safely
+            if ycol not in daily.columns:
+                st.info("No data available for the selected score type.")
             else:
-                fig = px.line(daily, x="date_only", y=ycol, markers=True)
-                fig.update_layout(height=460, margin=dict(l=10, r=10, t=10, b=10),
-                                  xaxis_title="", yaxis_title="")
-                st.plotly_chart(fig, use_container_width=True)
-
+                ydata = pd.to_numeric(daily[ycol], errors="coerce").dropna()
+                if ydata.empty:
+                    st.info("No values available to plot for this score type.")
+                else:
+                    fig = px.line(daily, x="date_only", y=ycol, markers=True)
+                    fig.update_layout(
+                        height=460,
+                        margin=dict(l=10, r=10, t=10, b=10),
+                        xaxis_title="",
+                        yaxis_title="",
+                    )
+                    st.plotly_chart(fig, use_container_width=True)
