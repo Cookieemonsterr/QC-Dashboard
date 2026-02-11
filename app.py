@@ -400,13 +400,13 @@ left, right = st.columns([0.78, 0.22], vertical_alignment="bottom")
 with left:
     st.markdown('<div class="qc-title">QC Scores Dashboard</div>', unsafe_allow_html=True)
     st.markdown(
-        '<div class="qc-sub">✅ Averages match Google Sheets (row-level Evaluation Report) • Other fields from Overall</div>',
+        '<div class="qc-sub">Average QC Scores</div>',
         unsafe_allow_html=True
     )
 
 with right:
     st.download_button(
-        "⬇️ Download filtered score rows (matches sheet)",
+        "⬇️ Download filtered score rows",
         data=rf.to_csv(index=False).encode("utf-8"),
         file_name="qc_score_rows_filtered.csv",
         mime="text/csv",
@@ -426,12 +426,9 @@ rows_count = len(rf)
 sent_back_total = int(pd.to_numeric(rf["sent_back"], errors="coerce").fillna(0).sum())
 low_perf = int((pd.to_numeric(rf["score_pct"], errors="coerce") < 90).fillna(False).sum())
 
-with k1: kpi_card("Average score (matches sheet)", "—" if avg_score is None else f"{avg_score:.2f}%")
-with k2: kpi_card("Tickets in view", f"{tickets_count:,}")
-with k3: kpi_card("Score rows in view", f"{rows_count:,}")
-with k4: kpi_card("Low rows (<90%)", f"{low_perf:,}")
-with k5: kpi_card("Sent Back (rows sum)", f"{sent_back_total:,}")
-with k6: kpi_card("Mode", bucket)
+with k1: kpi_card("Average score", "—" if avg_score is None else f"{avg_score:.2f}%")
+with k2: kpi_card("Sent Back", f"{sent_back_total:,}")
+with k3: kpi_card("Mode", bucket)
 
 st.markdown("<br/>", unsafe_allow_html=True)
 
@@ -441,7 +438,7 @@ st.markdown("<br/>", unsafe_allow_html=True)
 a, b = st.columns([0.62, 0.38])
 
 with a:
-    st.markdown("### Tickets (1 row per Reference ID)")
+    st.markdown("### Tickets")
     cols = [
         "ticket_id", "ticket_type",
         "catalog_agent", "catalog_score_pct",
@@ -463,7 +460,7 @@ with a:
     )
 
 with b:
-    st.markdown("### Score Change (by Evaluation Date)")
+    st.markdown("### Score Change")
     t = rf.dropna(subset=["dt"]).copy()
     if t.empty:
         st.info("No evaluation datetime values available for this filter.")
@@ -483,7 +480,7 @@ st.markdown("<br/>", unsafe_allow_html=True)
 c1, c2, c3 = st.columns([0.34, 0.33, 0.33])
 
 with c1:
-    st.markdown("### Ticket type split (score rows)")
+    st.markdown("### Ticket type split")
     tt = rf["ticket_type"].fillna("Other").value_counts().reset_index()
     tt.columns = ["ticket_type", "count"]
     fig = px.pie(tt, names="ticket_type", values="count", hole=0.55)
@@ -491,7 +488,7 @@ with c1:
     st.plotly_chart(fig, use_container_width=True)
 
 with c2:
-    st.markdown("### Score distribution (score rows)")
+    st.markdown("### Score distribution")
     s = pd.to_numeric(rf["score_pct"], errors="coerce").dropna()
     if s.empty:
         st.info("No score values available.")
@@ -501,7 +498,7 @@ with c2:
         st.plotly_chart(fig, use_container_width=True)
 
 with c3:
-    st.markdown("### Score rows by City (no Unknown)")
+    st.markdown("### Score rows by City")
     city_counts = rf["city"].dropna().astype(str).value_counts().reset_index()
     city_counts.columns = ["city", "row_count"]
     fig = px.bar(city_counts.head(20), x="city", y="row_count")
