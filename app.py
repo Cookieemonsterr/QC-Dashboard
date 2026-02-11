@@ -268,7 +268,7 @@ if st.sidebar.button("🔄 Refresh"):
 @st.cache_data(show_spinner=False, ttl=600)
 def load_all():
     # Base
-    base_raw = pd.read_excel(BASE_PATH, sheet_name=0)
+    base_raw = pd.read_csv(BASE_PATH, low_memory=False)
     base_raw.columns = [normalize_header(c) for c in base_raw.columns]
     base_raw.columns = make_unique(base_raw.columns)
     base = collapse_base(base_raw)
