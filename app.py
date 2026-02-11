@@ -1,27 +1,36 @@
+# app.py — QC Scores Dashboard (iStep)
+# Repo files:
+#   - Istep Data (1).xls
+#   - Evaluation Report Istep - Report.csv
+#
+# Logic:
+# - Ticket type from Subject (Build/Update/Existing)
+# - Scores & Sent Back from Report CSV (cards)
+# - De-dupe duplicates within same ticket/card/agent
+# - Total QC = Ticket Score (main card by ticket type)
+# - Catalogue QC = relevant update/build/existing catalogue-side cards
+# - Studio QC = Studio scorecard + Images Update
 
-import io
 import re
 import html
+import time
 from collections import defaultdict
 
-import requests
 import pandas as pd
 import plotly.express as px
 import streamlit as st
 
-SHEET_ID = "1rQHlDgQC5mZQ00fPVz20h4KEFbmsosE2"
-
-XLSX_URL = f"https://docs.google.com/spreadsheets/d/{SHEET_ID}/export?format=xlsx"
-CSV_URL  = f"https://docs.google.com/spreadsheets/d/{SHEET_ID}/export?format=csv"
+# ============================================================
+# ✅ FILES IN REPO (same folder as app.py)
+# ============================================================
+BASE_PATH = "Istep Data (1).xls"
+REPORT_PATH = "Evaluation Report Istep - Report.csv"
 
 # ============================================================
 # PAGE
 # ============================================================
 st.set_page_config(page_title="QC Scores Dashboard (iStep)", page_icon="✅", layout="wide")
 
-# ============================================================
-# LIGHT/DARK SAFE UI
-# ============================================================
 CSS = """
 <style>
 .block-container{ padding-top: 2.1rem !important; }
@@ -53,7 +62,6 @@ html[data-theme="light"]{
 }
 .kpi .label{ font-size:.9rem; color: var(--muted); margin-bottom:2px; }
 .kpi .value{ font-size:2.05rem; font-weight:900; }
-.kpi .delta{ font-size:.9rem; color: var(--muted); }
 
 hr{ border:none; border-top:1px solid var(--hr); margin:.8rem 0; }
 </style>
@@ -67,8 +75,6 @@ def normalize_header(h: str) -> str:
     h = "" if h is None else str(h)
     h = html.unescape(h)
     h = re.sub(r"\s+", " ", h).strip()
-    if " : " in h:
-        h = h.split(" : ", 1)[1].strip()
     return h
 
 def make_unique(cols):
@@ -85,18 +91,13 @@ def safe_col(df: pd.DataFrame, candidates: list[str]) -> str | None:
             return c
     return None
 
-# ✅ FIXED: handles "100%" properly
 def _to_pct(series: pd.Series) -> pd.Series:
     if series is None:
         return series
-    s = series.astype(str)
-    s = s.str.replace("%", "", regex=False).str.replace(",", "", regex=False).str.strip()
+    s = series.astype(str).str.replace("%", "", regex=False).str.replace(",", "", regex=False).str.strip()
     s = pd.to_numeric(s, errors="coerce")
-
     if s.dropna().empty:
         return s
-
-    # if values look like 0..1, convert to %
     if (s.dropna() <= 1.5).mean() > 0.7:
         s = s * 100
     return s
@@ -105,30 +106,12 @@ def mean_pct(x: pd.Series):
     x = pd.to_numeric(x, errors="coerce")
     return None if x.dropna().empty else float(x.mean())
 
-def kpi_card(label: str, value: str, delta: str | None = None):
-    d = f'<div class="kpi"><div class="label">{label}</div><div class="value">{value}</div>'
-    if delta:
-        d += f'<div class="delta">{delta}</div>'
-    d += "</div>"
-    st.markdown(d, unsafe_allow_html=True)
+def kpi_card(label: str, value: str):
+    st.markdown(
+        f'<div class="kpi"><div class="label">{label}</div><div class="value">{value}</div></div>',
+        unsafe_allow_html=True,
+    )
 
-# ============================================================
-# ✅ TICKET TYPE RULES
-# ============================================================
-def map_ticket_type(raw: str) -> str:
-    s = ("" if raw is None else str(raw)).strip()
-    low = s.lower()
-    if low.startswith("outlet catalogue update request"):
-        return "Update Tickets"
-    if low.startswith("new brand setup"):
-        return "Build Tickets"
-    if low.startswith("new outlet setup for existing brand"):
-        return "Existing Tickets"
-    return "Other"
-
-# ============================================================
-# ✅ COLLAPSE TO 1 ROW PER TICKET (FIXED FOR YOUR REAL DATA)
-# ============================================================
 def first_non_empty(series: pd.Series):
     s = series.dropna().astype(str).str.strip()
     s = s[(s != "") & (s.str.lower() != "nan")]
@@ -140,46 +123,46 @@ def unique_join(series: pd.Series, sep=" | "):
     uniq = list(dict.fromkeys(s.tolist()))
     return sep.join(uniq) if uniq else pd.NA
 
-def mean_numeric(series: pd.Series):
-    s = pd.to_numeric(series, errors="coerce")
-    return pd.NA if s.dropna().empty else float(s.mean())
+# ============================================================
+# TICKET TYPE FROM SUBJECT (your original logic)
+# ============================================================
+def map_ticket_type_from_subject(subject: str) -> str:
+    s = ("" if subject is None else str(subject)).strip().lower()
+    if s.startswith("outlet catalogue update request"):
+        return "Update Tickets"
+    if s.startswith("new brand setup"):
+        return "Build Tickets"
+    if s.startswith("new outlet setup for existing brand"):
+        return "Existing Tickets"
+    return "Other"
 
-def max_numeric(series: pd.Series):
-    s = pd.to_numeric(series, errors="coerce")
-    return pd.NA if s.dropna().empty else float(s.max())
-
-def collapse_tickets(df: pd.DataFrame) -> pd.DataFrame:
+# ============================================================
+# BASE COLLAPSE: 1 row per Reference ID
+# ============================================================
+def collapse_base(df: pd.DataFrame) -> pd.DataFrame:
     ref = safe_col(df, ["Reference ID", "Ticket ID"])
     if not ref:
         return df
 
-    # Explicit columns (your sheet names)
+    subject = safe_col(df, ["Subject", "Ticket Type"])
+    c_city = safe_col(df, ["Catalogue City", "City"])
+    c_market = safe_col(df, ["Catalogue Market", "Market"])
+    c_dt = safe_col(df, ["Catalogue Date & Time", "Ticket Creation Time"])
+    s_dt = safe_col(df, ["Studio Date & Time", "Ticket Creation Time__2"])
+
     c_agent = safe_col(df, ["Catalogue Name", "Catalogue Agent Name"])
     s_agent = safe_col(df, ["Studio Name", "Studio Agent Name"])
 
-    c_score = safe_col(df, ["Catalogue Score", "Catalogue Agent QC Score", "Catalogue Agent QC Score__2"])
-    s_score = safe_col(df, ["Studio Score", "Studio Agent QC Score", "Studio Agent QC Score__2"])
-    t_score = safe_col(df, ["Ticket Score"])
-
-    c_sb = safe_col(df, ["Catalogue Sent Back To Catalog", "Sent back to catalog"])
-    s_sb = safe_col(df, ["Studio Sent Back To Catalog", "Sent back to catalog__2"])
-
     agg = {}
-
-    # Agents
+    if subject: agg[subject] = first_non_empty
+    if c_city: agg[c_city] = first_non_empty
+    if c_market: agg[c_market] = first_non_empty
+    if c_dt: agg[c_dt] = first_non_empty
+    if s_dt: agg[s_dt] = first_non_empty
     if c_agent: agg[c_agent] = unique_join
-    if s_agent: agg[s_agent] = first_non_empty  # only one studio agent
+    if s_agent: agg[s_agent] = first_non_empty
 
-    # Scores
-    if c_score: agg[c_score] = mean_numeric      # many catalogue rows → average
-    if s_score: agg[s_score] = first_non_empty   # usually only one row has it
-    if t_score: agg[t_score] = first_non_empty   # ticket-level
-
-    # ✅ Sent back is duplicated in catalogue rows → use MAX (NOT SUM)
-    if c_sb: agg[c_sb] = max_numeric
-    if s_sb: agg[s_sb] = max_numeric
-
-    # Everything else: keep first real value so details don’t disappear
+    # keep other columns too (first non-empty)
     for col in df.columns:
         if col == ref or col in agg:
             continue
@@ -189,132 +172,183 @@ def collapse_tickets(df: pd.DataFrame) -> pd.DataFrame:
     out.rename(columns={ref: "Reference ID"}, inplace=True)
     return out
 
-def _http_get(url: str) -> requests.Response:
-    headers = {"User-Agent": "Mozilla/5.0", "Accept": "*/*"}
-    return requests.get(url, headers=headers, timeout=120, allow_redirects=True)
+# ============================================================
+# REPORT CARD RULES (your message)
+# ============================================================
+UPDATE_FORMS = {
+    "Price Update",
+    "Update scorecard",
+    "Location Update",
+    "Tags Update",
+    "Operational Hours Update",
+}
+STUDIO_FORMS = {"Studio scorecard", "Images Update"}
 
-@st.cache_data(show_spinner=False, ttl=600)
-def load_sheet_df() -> pd.DataFrame:
-    r = _http_get(XLSX_URL)
-    if r.status_code == 200 and len(r.content) > 1000:
-        try:
-            return pd.read_excel(io.BytesIO(r.content), sheet_name=0)
-        except Exception:
-            pass
+BUILD_MAIN_FORM = "New Points/ Builds"
+EXISTING_MAIN_FORM = "Existing Company and Brand - New Outlet"
+CATALOGUE_SCORECARD_FORM = "Catalogue scorecard"
 
-    r2 = _http_get(CSV_URL)
-    if r2.status_code == 200 and len(r2.content) > 10:
-        return pd.read_csv(io.BytesIO(r2.content))
+def build_scores_from_report(report: pd.DataFrame, ref_to_type: dict[str, str]) -> pd.DataFrame:
+    ref = safe_col(report, ["Reference ID"])
+    form = safe_col(report, ["Form Name"])
+    score = safe_col(report, ["Score"])
+    sb_cat = safe_col(report, ["Sent Back To Catalog"])
+    name = safe_col(report, ["Name", "Agent Name"])
+    user_id = safe_col(report, ["User Id", "User ID", "Agent User Id"])
 
-    raise RuntimeError(
-        f"Could not download sheet. XLSX={r.status_code} CSV={r2.status_code}. "
-        "Make sure sharing is 'Anyone with the link (Viewer)'."
+    if not ref or not form or not score:
+        raise RuntimeError("Report CSV must include: Reference ID, Form Name, Score")
+
+    r = report.copy()
+    r["__ref__"] = r[ref].astype(str).str.strip()
+    r["__form__"] = r[form].astype(str).str.strip()
+    r["__score__"] = _to_pct(r[score])
+    r["__sent_back__"] = pd.to_numeric(r[sb_cat], errors="coerce").fillna(0) if sb_cat else 0
+
+    r["__agent__"] = (r[name].astype(str).str.strip() if name else "")
+    r["__uid__"] = (r[user_id].astype(str).str.strip() if user_id else "")
+
+    r["__ticket_type__"] = r["__ref__"].map(ref_to_type).fillna("Other")
+
+    # ✅ De-dupe duplicates within same ticket/card/agent
+    # This matches: "take everything unless duplicated in the same ticket"
+    r = r.drop_duplicates(subset=["__ref__", "__form__", "__agent__", "__uid__", "__score__", "__sent_back__"])
+
+    # --------------------------
+    # Catalogue QC rows
+    # --------------------------
+    is_catalog_update = (r["__ticket_type__"] == "Update Tickets") & (r["__form__"].isin(UPDATE_FORMS))
+
+    is_catalog_build = (r["__ticket_type__"] == "Build Tickets") & (
+        (r["__form__"] == BUILD_MAIN_FORM) | (r["__form__"] == CATALOGUE_SCORECARD_FORM)
     )
 
-@st.cache_data(show_spinner=False, ttl=600)
-def load_clean_df() -> pd.DataFrame:
-    df = load_sheet_df()
+    is_catalog_existing = (r["__ticket_type__"] == "Existing Tickets") & (
+        (r["__form__"] == EXISTING_MAIN_FORM) | (r["__form__"] == CATALOGUE_SCORECARD_FORM)
+    )
 
-    # normalize headers + keep duplicates
-    df.columns = [normalize_header(c) for c in df.columns]
-    df.columns = make_unique(df.columns)
+    is_catalog = is_catalog_update | is_catalog_build | is_catalog_existing
 
-    # collapse multi-row tickets
-    df = collapse_tickets(df)
+    # --------------------------
+    # Studio QC rows
+    # --------------------------
+    is_studio = r["__form__"].isin(STUDIO_FORMS)
 
-    # normalize again after collapse
-    df.columns = [normalize_header(c) for c in df.columns]
-    df.columns = make_unique(df.columns)
+    # --------------------------
+    # Ticket Score (Total QC) rows
+    # --------------------------
+    is_ticket_build = (r["__ticket_type__"] == "Build Tickets") & (r["__form__"] == BUILD_MAIN_FORM)
+    is_ticket_update = (r["__ticket_type__"] == "Update Tickets") & (r["__form__"] == "Update scorecard")
+    is_ticket_existing = (r["__ticket_type__"] == "Existing Tickets") & (r["__form__"] == EXISTING_MAIN_FORM)
+    is_ticket = is_ticket_build | is_ticket_update | is_ticket_existing
 
-    col_ref = safe_col(df, ["Reference ID", "Ticket ID"])
-    col_subject = safe_col(df, ["Subject", "Ticket Type"])
+    cat = (
+        r.loc[is_catalog]
+        .groupby("__ref__", as_index=False)["__score__"]
+        .mean()
+        .rename(columns={"__score__": "catalog_score_pct"})
+    )
 
-    col_ticket_score = safe_col(df, ["Ticket Score"])
-    col_cat_score = safe_col(df, ["Catalogue Score", "Catalogue Agent QC Score"])
-    col_stu_score = safe_col(df, ["Studio Score", "Studio Agent QC Score"])
+    stu = (
+        r.loc[is_studio]
+        .groupby("__ref__", as_index=False)["__score__"]
+        .mean()
+        .rename(columns={"__score__": "studio_score_pct"})
+    )
 
-    col_cat_agent = safe_col(df, ["Catalogue Name", "Catalogue Agent Name"])
-    col_stu_agent = safe_col(df, ["Studio Name", "Studio Agent Name"])
+    ticket = (
+        r.loc[is_ticket]
+        .sort_values(["__ref__"])
+        .groupby("__ref__", as_index=False)["__score__"]
+        .apply(lambda s: s.dropna().iloc[0] if len(s.dropna()) else pd.NA)
+        .rename(columns={"__score__": "ticket_score_pct"})
+    )
 
-    col_cat_sb = safe_col(df, ["Catalogue Sent Back To Catalog", "Sent back to catalog"])
-    col_stu_sb = safe_col(df, ["Studio Sent Back To Catalog", "Sent back to catalog__2"])
+    sent_back = (
+        r.groupby("__ref__", as_index=False)["__sent_back__"]
+        .sum()
+        .rename(columns={"__sent_back__": "sent_back_total"})
+    )
 
-    col_cat_dt = safe_col(df, ["Catalogue Date & Time", "Ticket Creation Time"])
-    col_stu_dt = safe_col(df, ["Studio Date & Time", "Ticket Creation Time__2"])
-
-    col_city = safe_col(df, ["Catalogue City", "Studio City", "City", "City__2"])
-    col_market = safe_col(df, ["Catalogue Market", "Studio Market", "Market", "Market__2"])
-
-    df["ticket_id"] = df[col_ref].astype(str) if col_ref else df.index.astype(str)
-    df["ticket_type_raw"] = df[col_subject].astype(str) if col_subject else ""
-    df["ticket_type"] = df["ticket_type_raw"].apply(map_ticket_type)
-
-    # Scores (fixed parsing)
-    df["ticket_score_pct"] = _to_pct(df[col_ticket_score]) if col_ticket_score else pd.NA
-    df["catalog_score_pct"] = _to_pct(df[col_cat_score]) if col_cat_score else pd.NA
-    df["studio_score_pct"] = _to_pct(df[col_stu_score]) if col_stu_score else pd.NA
-
-    # Agents
-    df["catalog_agent"] = df[col_cat_agent] if col_cat_agent else pd.NA
-    df["studio_agent"] = df[col_stu_agent] if col_stu_agent else pd.NA
-
-    # Sent back (now correct because collapse used MAX)
-    df["catalog_sent_back"] = pd.to_numeric(df[col_cat_sb], errors="coerce").fillna(0) if col_cat_sb else 0
-    df["studio_sent_back"]  = pd.to_numeric(df[col_stu_sb], errors="coerce").fillna(0) if col_stu_sb else 0
-
-    # City/Market
-    df["city"] = df[col_city] if col_city else pd.NA
-    df["market"] = df[col_market] if col_market else pd.NA
-
-    # Datetime
-    cat_dt = pd.to_datetime(df[col_cat_dt], errors="coerce") if col_cat_dt else pd.NaT
-    stu_dt = pd.to_datetime(df[col_stu_dt], errors="coerce") if col_stu_dt else pd.NaT
-    df["dt"] = cat_dt.fillna(stu_dt)
-
-    df["date"] = df["dt"].dt.date
-    df["month"] = df["dt"].dt.to_period("M").astype(str)
-    df["week"] = df["dt"].dt.isocalendar().week.astype("Int64")
-    df["day"] = df["dt"].dt.day_name()
-
-    # ✅ YOUR RULES:
-    # Catalog QC = Catalogue Score
-    # Studio QC  = Studio Score
-    # Total QC   = Ticket Score
-    df["total_qc_pct"] = df["ticket_score_pct"]
-
-    return df
+    out = sent_back.merge(cat, on="__ref__", how="left").merge(stu, on="__ref__", how="left").merge(ticket, on="__ref__", how="left")
+    out["sent_back_total"] = pd.to_numeric(out["sent_back_total"], errors="coerce").fillna(0).astype(int)
+    return out
 
 # ============================================================
-# SIDEBAR + LOAD
+# LOAD
 # ============================================================
 st.sidebar.markdown("## Data")
-if st.sidebar.button("🔄 Refresh data now"):
+if st.sidebar.button("🔄 Refresh"):
     st.cache_data.clear()
 
-try:
-    df = load_clean_df()
-except Exception as e:
-    st.error("Data download failed.")
-    st.code(str(e))
-    st.stop()
+@st.cache_data(show_spinner=False, ttl=600)
+def load_all():
+    # Base
+    base_raw = pd.read_excel(BASE_PATH, sheet_name=0)
+    base_raw.columns = [normalize_header(c) for c in base_raw.columns]
+    base_raw.columns = make_unique(base_raw.columns)
+    base = collapse_base(base_raw)
+
+    subj_col = safe_col(base, ["Subject", "Ticket Type"])
+    base["ticket_type_raw"] = base[subj_col].astype(str) if subj_col else ""
+    base["ticket_type"] = base["ticket_type_raw"].apply(map_ticket_type_from_subject)
+
+    ref_to_type = dict(zip(base["Reference ID"].astype(str).str.strip(), base["ticket_type"]))
+
+    # Report
+    report = pd.read_csv(REPORT_PATH, encoding="utf-8", low_memory=False)
+    report.columns = [normalize_header(c) for c in report.columns]
+    report.columns = make_unique(report.columns)
+
+    scores = build_scores_from_report(report, ref_to_type)
+
+    # Merge
+    base["__ref__"] = base["Reference ID"].astype(str).str.strip()
+    merged = base.merge(scores, on="__ref__", how="left")
+
+    # Filters fields
+    city_col = safe_col(merged, ["Catalogue City", "City"])
+    market_col = safe_col(merged, ["Catalogue Market", "Market"])
+    c_agent_col = safe_col(merged, ["Catalogue Name", "Catalogue Agent Name"])
+    s_agent_col = safe_col(merged, ["Studio Name", "Studio Agent Name"])
+
+    merged["ticket_id"] = merged["Reference ID"].astype(str)
+    merged["city"] = merged[city_col] if city_col else pd.NA
+    merged["market"] = merged[market_col] if market_col else pd.NA
+    merged["catalog_agent"] = merged[c_agent_col] if c_agent_col else pd.NA
+    merged["studio_agent"] = merged[s_agent_col] if s_agent_col else pd.NA
+
+    # Datetime from base
+    col_cat_dt = safe_col(merged, ["Catalogue Date & Time", "Ticket Creation Time"])
+    col_stu_dt = safe_col(merged, ["Studio Date & Time", "Ticket Creation Time__2"])
+    merged["dt"] = pd.to_datetime(merged[col_cat_dt], errors="coerce") if col_cat_dt else pd.NaT
+    if col_stu_dt:
+        merged["dt"] = merged["dt"].fillna(pd.to_datetime(merged[col_stu_dt], errors="coerce"))
+
+    merged["date"] = merged["dt"].dt.date
+
+    # Total QC = Ticket Score
+    merged["total_qc_pct"] = merged["ticket_score_pct"]
+
+    # remove "Unknown" city values (so they don't appear in charts)
+    merged.loc[merged["city"].astype(str).str.strip().str.lower() == "unknown", "city"] = pd.NA
+
+    return merged
+
+t0 = time.time()
+with st.spinner("Loading…"):
+    df = load_all()
+st.caption(f"Loaded in {time.time()-t0:.2f}s")
 
 # ============================================================
 # FILTERS
 # ============================================================
 st.sidebar.markdown("## Filters")
-
-view_mode = st.sidebar.radio(
-    "Ticket Type View",
-    ["All", "Build Tickets", "Update Tickets", "Existing Tickets"],
-    index=0,
-)
+view_mode = st.sidebar.radio("Ticket Type View", ["All", "Build Tickets", "Update Tickets", "Existing Tickets"], index=0)
 
 min_dt = df["dt"].min()
 max_dt = df["dt"].max()
-default_range = (
-    (min_dt.date() if pd.notna(min_dt) else None),
-    (max_dt.date() if pd.notna(max_dt) else None),
-)
+default_range = ((min_dt.date() if pd.notna(min_dt) else None), (max_dt.date() if pd.notna(max_dt) else None))
 date_range = st.sidebar.date_input("Date range", value=default_range)
 
 cities = sorted([c for c in df["city"].dropna().astype(str).unique().tolist() if c.strip() and c.lower() != "nan"])
@@ -323,61 +357,39 @@ sel_cities = st.sidebar.multiselect("City", cities, default=[])
 markets = sorted([m for m in df["market"].dropna().astype(str).unique().tolist() if m.strip() and m.lower() != "nan"])
 sel_markets = st.sidebar.multiselect("Market", markets, default=[])
 
-cat_agents = sorted([a for a in df["catalog_agent"].dropna().astype(str).unique().tolist() if a.strip() and a.lower() != "nan"])
-sel_cat_agents = st.sidebar.multiselect("Catalogue Agent", cat_agents, default=[])
-
-stu_agents = sorted([a for a in df["studio_agent"].dropna().astype(str).unique().tolist() if a.strip() and a.lower() != "nan"])
-sel_stu_agents = st.sidebar.multiselect("Studio Agent", stu_agents, default=[])
-
 ticket_id_search = st.sidebar.text_input("Ticket ID contains", value="")
 
-score_type = st.sidebar.selectbox(
-    "Score Type",
-    ["Ticket Score (Total QC)", "Catalogue Score", "Studio Score"],
-    index=0,
-)
+score_type = st.sidebar.selectbox("Score Type (charts)", ["Total QC (Ticket Score)", "Catalogue QC", "Studio QC"], index=0)
 score_col = {
-    "Ticket Score (Total QC)": "ticket_score_pct",
-    "Catalogue Score": "catalog_score_pct",
-    "Studio Score": "studio_score_pct",
+    "Total QC (Ticket Score)": "ticket_score_pct",
+    "Catalogue QC": "catalog_score_pct",
+    "Studio QC": "studio_score_pct",
 }[score_type]
 
-# ============================================================
 # APPLY FILTERS
-# ============================================================
 f = df.copy()
-
 if view_mode != "All":
     f = f[f["ticket_type"] == view_mode]
 
 if isinstance(date_range, tuple) and len(date_range) == 2:
     start, end = date_range
-    if start:
-        f = f[f["date"] >= start]
-    if end:
-        f = f[f["date"] <= end]
+    if start: f = f[f["date"] >= start]
+    if end: f = f[f["date"] <= end]
 
 if sel_cities:
     f = f[f["city"].isin(sel_cities)]
 if sel_markets:
     f = f[f["market"].isin(sel_markets)]
-if sel_cat_agents:
-    f = f[f["catalog_agent"].isin(sel_cat_agents)]
-if sel_stu_agents:
-    f = f[f["studio_agent"].isin(sel_stu_agents)]
 if ticket_id_search.strip():
     f = f[f["ticket_id"].str.contains(ticket_id_search.strip(), case=False, na=False)]
 
 # ============================================================
-# HEADER
+# HEADER (fixed, no broken markdown)
 # ============================================================
 left, right = st.columns([0.78, 0.22], vertical_alignment="bottom")
-
 with left:
-    st.markdown(
-        '<div class="qc-title">QC Scores Dashboard</div>',
-        unsafe_allow_html=True,
-    )
+    st.markdown('<div class="qc-title">QC Scores Dashboard</div>', unsafe_allow_html=True)
+    st.markdown('<div class="qc-sub">Scores from Report CSV (cards) • Ticket type from Subject • De-duped per ticket/card/agent</div>', unsafe_allow_html=True)
 
 with right:
     st.download_button(
@@ -390,47 +402,50 @@ with right:
 
 st.markdown("<hr/>", unsafe_allow_html=True)
 
+# ============================================================
+# KPI ROW
+# ============================================================
 k1, k2, k3, k4, k5, k6 = st.columns(6)
 
-catalog_avg = mean_pct(f["catalog_score_pct"])       # Catalogue Score
-studio_avg  = mean_pct(f["studio_score_pct"])        # Studio Score
-total_avg   = mean_pct(f["ticket_score_pct"])        # Ticket Score = Total QC
-
-sent_back_catalog = int(pd.to_numeric(f["catalog_sent_back"], errors="coerce").fillna(0).sum())
-sent_back_studio  = int(pd.to_numeric(f["studio_sent_back"], errors="coerce").fillna(0).sum())
+catalog_avg = mean_pct(f["catalog_score_pct"])
+studio_avg = mean_pct(f["studio_score_pct"])
+total_avg = mean_pct(f["ticket_score_pct"])
+sent_back_total = int(pd.to_numeric(f["sent_back_total"], errors="coerce").fillna(0).sum())
 low_perf = int((pd.to_numeric(f["ticket_score_pct"], errors="coerce") < 90).fillna(False).sum())
 
-with k1: kpi_card("Catalog QC", "—" if catalog_avg is None else f"{catalog_avg:.2f}%")
+with k1: kpi_card("Catalogue QC", "—" if catalog_avg is None else f"{catalog_avg:.2f}%")
 with k2: kpi_card("Studio QC", "—" if studio_avg is None else f"{studio_avg:.2f}%")
-with k3: kpi_card("Total QC (Ticket)", "—" if total_avg is None else f"{total_avg:.2f}%")
-with k4: kpi_card("Sent Back → Catalog", f"{sent_back_catalog:,}")
-with k5: kpi_card("Sent Back → Studio", f"{sent_back_studio:,}")
+with k3: kpi_card("Total QC (Ticket Score)", "—" if total_avg is None else f"{total_avg:.2f}%")
+with k4: kpi_card("Low performers (<90%)", f"{low_perf:,}")
+with k5: kpi_card("Sent Back (total)", f"{sent_back_total:,}")
+with k6: kpi_card("Tickets (filtered)", f"{len(f):,}")
 
 st.markdown("<br/>", unsafe_allow_html=True)
 
-
+# ============================================================
+# TABLE + SCORE CHANGE
+# ============================================================
 a, b = st.columns([0.62, 0.38])
 
 with a:
     st.markdown("### Tickets")
-    show_cols = [
+    cols = [
         "ticket_id", "ticket_type", "ticket_type_raw",
         "catalog_agent", "catalog_score_pct",
         "studio_agent", "studio_score_pct",
         "ticket_score_pct",
         "city", "market", "dt",
-        "catalog_sent_back", "studio_sent_back",
+        "sent_back_total",
     ]
-    show_cols = [c for c in show_cols if c in f.columns]
-    tbl = f[show_cols].sort_values("dt", ascending=False)
+    cols = [c for c in cols if c in f.columns]
 
     st.dataframe(
-        tbl,
+        f[cols].sort_values("dt", ascending=False),
         use_container_width=True,
         height=460,
         column_config={
-            "catalog_score_pct": st.column_config.NumberColumn("Catalogue Score", format="%.2f%%"),
-            "studio_score_pct": st.column_config.NumberColumn("Studio Score", format="%.2f%%"),
+            "catalog_score_pct": st.column_config.NumberColumn("Catalogue QC", format="%.2f%%"),
+            "studio_score_pct": st.column_config.NumberColumn("Studio QC", format="%.2f%%"),
             "ticket_score_pct": st.column_config.NumberColumn("Ticket Score (Total QC)", format="%.2f%%"),
             "dt": st.column_config.DatetimeColumn("Date & Time"),
         },
@@ -444,9 +459,7 @@ with b:
     else:
         t["date_only"] = t["dt"].dt.date
         daily = (
-            t.groupby("date_only", as_index=False)[
-                ["catalog_score_pct", "studio_score_pct", "ticket_score_pct"]
-            ]
+            t.groupby("date_only", as_index=False)[["catalog_score_pct", "studio_score_pct", "ticket_score_pct"]]
             .mean(numeric_only=True)
             .sort_values("date_only")
         )
@@ -456,6 +469,9 @@ with b:
 
 st.markdown("<br/>", unsafe_allow_html=True)
 
+# ============================================================
+# SMALL CHARTS
+# ============================================================
 c1, c2, c3 = st.columns([0.34, 0.33, 0.33])
 
 with c1:
@@ -472,91 +488,20 @@ with c2:
     if s.empty:
         st.info("No score values available.")
     else:
-        fig = px.histogram(x=s, nbins=20)
+        fig = px.histogram(s, nbins=20)
         fig.update_layout(height=320, margin=dict(l=10, r=10, t=10, b=10), xaxis_title="Score (%)", yaxis_title="Tickets")
         st.plotly_chart(fig, use_container_width=True)
 
 with c3:
-    st.markdown("### Tickets by City")
+    st.markdown("### Tickets by City (no Unknown)")
     city_counts = (
         f["city"]
         .dropna()
         .astype(str)
-        .str.strip()
-        .loc[lambda s: (s != "") & (s.str.lower() != "nan") & (s.str.lower() != "unknown")]
         .value_counts()
         .reset_index()
     )
     city_counts.columns = ["city", "ticket_count"]
-
-    if city_counts.empty:
-        st.info("No city data available (after excluding Unknown).")
-    else:
-        fig = px.bar(city_counts.head(20), x="city", y="ticket_count")
-        fig.update_layout(height=320, margin=dict(l=10, r=10, t=10, b=10), xaxis_title="", yaxis_title="")
-        st.plotly_chart(fig, use_container_width=True)
-
-st.markdown("<br/>", unsafe_allow_html=True)
-
-# ============================================================
-# AGENTS
-# ============================================================
-st.markdown("## Agent Performance")
-
-p1, p2 = st.columns([0.52, 0.48])
-
-with p1:
-    st.markdown("### Catalogue agents")
-    ca = (
-        f.groupby("catalog_agent", dropna=False)
-        .agg(
-            tickets=("ticket_id", "count"),
-            avg_catalog=("catalog_score_pct", "mean"),
-            avg_ticket=("ticket_score_pct", "mean"),
-            sent_back=("catalog_sent_back", "sum"),
-        )
-        .reset_index()
-        .sort_values(["avg_ticket", "tickets"], ascending=[True, False])
-    )
-    ca["low_perf_flag"] = (ca["avg_ticket"] < 90).fillna(False)
-    st.dataframe(
-        ca,
-        use_container_width=True,
-        height=360,
-        column_config={
-            "catalog_agent": st.column_config.TextColumn("Catalogue Agent(s)"),
-            "tickets": st.column_config.NumberColumn("Tickets"),
-            "avg_catalog": st.column_config.NumberColumn("Avg Catalogue Score", format="%.2f%%"),
-            "avg_ticket": st.column_config.NumberColumn("Avg Ticket Score (Total QC)", format="%.2f%%"),
-            "sent_back": st.column_config.NumberColumn("Sent Back → Catalog"),
-            "low_perf_flag": st.column_config.CheckboxColumn("Low performer (<90%)"),
-        },
-    )
-
-with p2:
-    st.markdown("### Studio agents")
-    sa = (
-        f.groupby("studio_agent", dropna=False)
-        .agg(
-            tickets=("ticket_id", "count"),
-            avg_studio=("studio_score_pct", "mean"),
-            avg_ticket=("ticket_score_pct", "mean"),
-            sent_back=("studio_sent_back", "sum"),
-        )
-        .reset_index()
-        .sort_values(["avg_ticket", "tickets"], ascending=[True, False])
-    )
-    sa["low_perf_flag"] = (sa["avg_ticket"] < 90).fillna(False)
-    st.dataframe(
-        sa,
-        use_container_width=True,
-        height=360,
-        column_config={
-            "studio_agent": st.column_config.TextColumn("Studio Agent"),
-            "tickets": st.column_config.NumberColumn("Tickets"),
-            "avg_studio": st.column_config.NumberColumn("Avg Studio Score", format="%.2f%%"),
-            "avg_ticket": st.column_config.NumberColumn("Avg Ticket Score (Total QC)", format="%.2f%%"),
-            "sent_back": st.column_config.NumberColumn("Sent Back → Studio"),
-            "low_perf_flag": st.column_config.CheckboxColumn("Low performer (<90%)"),
-        },
-    )
+    fig = px.bar(city_counts.head(20), x="city", y="ticket_count")
+    fig.update_layout(height=320, margin=dict(l=10, r=10, t=10, b=10), xaxis_title="", yaxis_title="")
+    st.plotly_chart(fig, use_container_width=True)
