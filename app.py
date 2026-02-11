@@ -210,7 +210,7 @@ def load_data():
     overall["studio_agent"] = overall[s_agent_col] if s_agent_col else pd.NA
 
     # Evaluation Report (SOURCE OF TRUTH FOR SCORES)
-    ev = pd.read_csv(EVAL_PATH, low_memory=False)
+    ev = pd.read_csv(REPORT_PATH, low_memory=False)
     ev.columns = make_unique([normalize_header(c) for c in ev.columns])
 
     ref_col = safe_col(ev, ["Reference ID"])
