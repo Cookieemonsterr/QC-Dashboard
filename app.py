@@ -2,6 +2,7 @@ import re
 import html
 import time
 from collections import defaultdict
+
 import pandas as pd
 import plotly.express as px
 import streamlit as st
@@ -47,7 +48,16 @@ hr{ border:none; border-top:1px solid var(--hr); margin:.9rem 0; }
 """
 st.markdown(CSS, unsafe_allow_html=True)
 
+# ============================================================
+# FAST CSV CACHE (no UI change)
+# ============================================================
+@st.cache_data(show_spinner=False, ttl=1800)
+def read_csv_cached(path: str) -> pd.DataFrame:
+    return pd.read_csv(path, low_memory=False)
 
+# ============================================================
+# HELPERS
+# ============================================================
 def normalize_header(h: str) -> str:
     h = "" if h is None else str(h)
     h = html.unescape(h)
@@ -136,7 +146,9 @@ def collapse_overall(df: pd.DataFrame) -> pd.DataFrame:
     out.rename(columns={ref: "Reference ID"}, inplace=True)
     return out
 
-
+# ============================================================
+# BUCKETS
+# ============================================================
 UPDATE_FORMS = {
     "Price Update",
     "Update scorecard",
@@ -159,11 +171,9 @@ def bucket_for_row(ticket_type: str, form_name: str):
     tt = (ticket_type or "").strip()
     fn = (form_name or "").strip()
 
-    # Studio KPI bucket
     if fn in STUDIO_FORMS:
         return "Studio"
 
-    # Total KPI bucket (KEEP AS YOU HAVE IT)
     if (tt == "Build Tickets") and (fn in BUILD_MAIN_FORMS):
         return "Total"
     if (tt == "Update Tickets") and (fn == "Update scorecard"):
@@ -171,7 +181,6 @@ def bucket_for_row(ticket_type: str, form_name: str):
     if (tt == "Existing Tickets") and (fn in EXISTING_MAIN_FORMS):
         return "Total"
 
-    # Catalogue bucket (still used for some tables; but KPI Catalog QC will be NON-STUDIO)
     if (tt == "Update Tickets") and (fn in UPDATE_FORMS):
         return "Catalogue"
     if tt in {"Build Tickets", "Existing Tickets"} and (
@@ -190,7 +199,8 @@ if st.sidebar.button("Refresh data now"):
 
 @st.cache_data(show_spinner=False, ttl=600)
 def load_data():
-    overall = pd.read_csv(BASE_PATH, low_memory=False)
+    # ✅ cached reads (faster)
+    overall = read_csv_cached(BASE_PATH).copy()
     overall.columns = make_unique([normalize_header(c) for c in overall.columns])
     overall = collapse_overall(overall)
 
@@ -211,7 +221,7 @@ def load_data():
     overall["studio_agent"] = overall[s_agent_col] if s_agent_col else pd.NA
 
     # Evaluation Report (SOURCE OF TRUTH FOR SCORES)
-    ev = pd.read_csv(REPORT_PATH, low_memory=False)
+    ev = read_csv_cached(REPORT_PATH).copy()
     ev.columns = make_unique([normalize_header(c) for c in ev.columns])
 
     ref_col = safe_col(ev, ["Reference ID"])
@@ -223,7 +233,6 @@ def load_data():
     if not ref_col or not form_col or not score_col:
         raise RuntimeError("Evaluation report must contain: Reference ID, Form Name, Score")
 
-    ev = ev.copy()
     ev["__ref__"] = ev[ref_col].astype(str).str.strip()
     ev["form_name"] = ev[form_col].astype(str).str.strip()
     ev["score_pct"] = to_pct(ev[score_col])
@@ -231,38 +240,34 @@ def load_data():
     ev["dt"] = pd.to_datetime(ev[dt_col], errors="coerce") if dt_col else pd.NaT
     ev["date"] = ev["dt"].dt.date
 
-    # map ticket type onto each eval row (from overall)
     ref_to_type = dict(zip(overall["__ref__"], overall["ticket_type"]))
     ev["ticket_type"] = ev["__ref__"].map(ref_to_type).fillna("Other")
 
-    # bucket rows (for Studio + Total; Catalogue bucket still exists)
     ev["bucket"] = ev.apply(lambda r: bucket_for_row(r["ticket_type"], r["form_name"]), axis=1)
 
-    # ✅ IMPORTANT: define Studio vs Non-Studio exactly
     ev["is_studio"] = ev["form_name"].isin(STUDIO_FORMS)
     ev["is_non_studio"] = ~ev["is_studio"]
 
-    # join overall fields to eval rows (so City/Market/Agent filters work)
     rows = ev.merge(overall, on="__ref__", how="left", suffixes=("", "_overall"))
 
+    # ✅ make filters faster (no change to UI/numbers)
+    for c in ["ticket_type", "form_name", "city", "market", "catalog_agent", "studio_agent"]:
+        if c in rows.columns:
+            rows[c] = rows[c].astype("category")
+
     # Ticket-level table scores
-    # ✅ Catalog QC per ticket = mean of ALL NON-STUDIO rows for that ticket
     per_cat = (
         rows[rows["is_non_studio"]]
         .groupby("__ref__", as_index=False)["score_pct"]
         .mean()
         .rename(columns={"score_pct": "catalog_qc"})
     )
-
-    # Studio per ticket stays studio-only
     per_stu = (
         rows[rows["is_studio"]]
         .groupby("__ref__", as_index=False)["score_pct"]
         .mean()
         .rename(columns={"score_pct": "studio_qc"})
     )
-
-    # Total per ticket stays EXACTLY your Total bucket (unchanged)
     per_tot = (
         rows[rows["bucket"] == "Total"]
         .groupby("__ref__", as_index=False)["score_pct"]
@@ -270,7 +275,6 @@ def load_data():
         .rename(columns={"score_pct": "total_qc"})
     )
 
-    # Sent-back events per ticket (display only)
     sent_back_cat_events = (
         rows.groupby("__ref__", as_index=False)["sent_back_catalog"]
         .sum()
@@ -289,14 +293,40 @@ def load_data():
         tickets["sent_back_to_catalog_events"], errors="coerce"
     ).fillna(0).astype(int)
 
-    return rows, tickets
+    # ✅ PRECOMPUTE SENT-BACK FLAGS ONCE (numbers identical, faster later)
+    sb_cat_flag_all = (
+        rows[rows["is_non_studio"]]
+        .groupby("__ref__")["sent_back_catalog"]
+        .max()
+        .fillna(0)
+        .gt(0)
+    )
+    sb_stu_flag_all = (
+        rows[rows["is_studio"]]
+        .groupby("__ref__")["sent_back_catalog"]
+        .max()
+        .fillna(0)
+        .gt(0)
+    )
+
+    # ✅ PRECOMPUTE DAILY PER TICKET (keeps same math, faster later)
+    daily_per_ticket = (
+        rows.dropna(subset=["dt"])
+        .assign(date_only=lambda d: d["dt"].dt.date)
+        .groupby(["__ref__", "date_only"], as_index=False)["score_pct"]
+        .mean()
+    )
+
+    return rows, tickets, sb_cat_flag_all, sb_stu_flag_all, daily_per_ticket
 
 t0 = time.time()
 with st.spinner("Loading…"):
-    rows_df, tickets_df = load_data()
+    rows_df, tickets_df, sb_cat_flag_all, sb_stu_flag_all, daily_per_ticket = load_data()
 st.caption(f"Loaded in {time.time()-t0:.2f}s")
 
-
+# ============================================================
+# FILTERS
+# ============================================================
 st.sidebar.markdown("## Filters")
 
 ticket_view = st.sidebar.radio(
@@ -342,7 +372,9 @@ if sel_studio_agent:
 allowed_refs = set(rf["__ref__"].dropna().astype(str))
 tf = tickets_df[tickets_df["__ref__"].astype(str).isin(allowed_refs)].copy()
 
-
+# ============================================================
+# HEADER
+# ============================================================
 top_left, top_right = st.columns([0.72, 0.28], vertical_alignment="center")
 with top_left:
     st.markdown('<div class="qc-title">QC Scores Dashboard</div>', unsafe_allow_html=True)
@@ -358,28 +390,23 @@ with top_right:
 
 st.markdown("<hr/>", unsafe_allow_html=True)
 
-
+# ============================================================
+# KPIs
+# ============================================================
 k1, k2, k3, k4, k5 = st.columns(5)
 
-# ✅ Catalog QC rows = ALL NON-STUDIO rows
 cat_rows = rf[rf["is_non_studio"]].copy()
-
-# Studio rows unchanged
 stu_rows = rf[rf["is_studio"]].copy()
-
-# Total rows unchanged (as you asked)
 tot_rows = rf[rf["bucket"] == "Total"].copy()
 
 cat_avg = mean_pct(cat_rows["score_pct"])
 stu_avg = mean_pct(stu_rows["score_pct"])
 tot_avg = mean_pct(tot_rows["score_pct"])
 
-sent_back_catalog_tickets = (
-    cat_rows.groupby("__ref__")["sent_back_catalog"].max().fillna(0).gt(0).sum()
-)
-sent_back_studio_tickets = (
-    stu_rows.groupby("__ref__")["sent_back_catalog"].max().fillna(0).gt(0).sum()
-)
+# ✅ faster: just count within filtered refs using precomputed flags
+tf_ref = tf["__ref__"].astype(str)
+sent_back_catalog_tickets = int(tf_ref.map(sb_cat_flag_all).fillna(False).sum())
+sent_back_studio_tickets  = int(tf_ref.map(sb_stu_flag_all).fillna(False).sum())
 
 with k1: kpi_card("Catalog QC", "—" if cat_avg is None else f"{cat_avg:.2f}%")
 with k2: kpi_card("Studio QC", "—" if stu_avg is None else f"{stu_avg:.2f}%")
@@ -389,14 +416,12 @@ with k5: kpi_card("Sent Back → Studio (Tickets)", f"{int(sent_back_studio_tick
 
 st.markdown("<br/>", unsafe_allow_html=True)
 
-
-left, right = st.columns([0.62, 0.38])
-#charts
+# ============================================================
+# INSIGHTS
+# ============================================================
 st.markdown("## Insights")
-
 c1, c2, c3 = st.columns([0.34, 0.33, 0.33])
 
-# 1️⃣ Ticket Type Split (unique tickets)
 with c1:
     st.markdown("### Ticket type split")
     tt = tf["ticket_type"].fillna("Other").value_counts().reset_index()
@@ -405,7 +430,6 @@ with c1:
     fig.update_layout(height=320, margin=dict(l=10, r=10, t=10, b=10))
     st.plotly_chart(fig, use_container_width=True)
 
-# 2️⃣ Score Distribution (evaluation rows)
 with c2:
     st.markdown("### Score distribution")
     s = pd.to_numeric(rf["score_pct"], errors="coerce").dropna()
@@ -421,7 +445,6 @@ with c2:
         )
         st.plotly_chart(fig, use_container_width=True)
 
-# 3️⃣ Tickets by City
 with c3:
     st.markdown("### Tickets by City")
     city_series = tf["city"].dropna().astype(str).str.strip()
@@ -430,7 +453,6 @@ with c3:
         & (city_series.str.lower() != "nan")
         & (city_series.str.lower() != "unknown")
     ]
-
     city_counts = city_series.value_counts().reset_index()
     city_counts.columns = ["city", "ticket_count"]
 
@@ -446,11 +468,14 @@ with c3:
         )
         st.plotly_chart(fig, use_container_width=True)
 
-cat_flag = cat_rows.groupby("__ref__")["sent_back_catalog"].max().fillna(0).gt(0)
-stu_flag = stu_rows.groupby("__ref__")["sent_back_catalog"].max().fillna(0).gt(0)
+# ✅ faster: map flags (no groupby here)
+tf["Sent Back → Catalog"] = tf_ref.map(sb_cat_flag_all).fillna(False).map(lambda x: "Yes" if x else "No")
+tf["Sent Back → Studio"]  = tf_ref.map(sb_stu_flag_all).fillna(False).map(lambda x: "Yes" if x else "No")
 
-tf["Sent Back → Catalog"] = tf["__ref__"].map(cat_flag).fillna(False).map(lambda x: "Yes" if x else "No")
-tf["Sent Back → Studio"] = tf["__ref__"].map(stu_flag).fillna(False).map(lambda x: "Yes" if x else "No")
+# ============================================================
+# TICKETS + SCORE CHANGE
+# ============================================================
+left, right = st.columns([0.62, 0.38])
 
 with left:
     st.markdown("## Tickets")
@@ -483,19 +508,27 @@ with left:
 
 with right:
     st.markdown("## Score Change")
-    t = rf.dropna(subset=["dt"]).copy()
-    if t.empty:
+
+    # ✅ fast: use precomputed daily_per_ticket, then aggregate only the filtered refs
+    dpt = daily_per_ticket[daily_per_ticket["__ref__"].astype(str).isin(allowed_refs)].copy()
+    if dpt.empty:
         st.info("No evaluation datetime values available for this filter.")
     else:
-        t["date_only"] = t["dt"].dt.date
-        daily = t.groupby("date_only", as_index=False)["score_pct"].mean().sort_values("date_only")
+        daily = (
+            dpt.groupby("date_only", as_index=False)["score_pct"]
+               .mean()
+               .sort_values("date_only")
+        )
+
         fig = px.line(daily, x="date_only", y="score_pct", markers=True)
         fig.update_layout(height=520, margin=dict(l=10, r=10, t=10, b=10), xaxis_title="", yaxis_title="")
         st.plotly_chart(fig, use_container_width=True)
 
 st.markdown("<br/>", unsafe_allow_html=True)
 
-
+# ============================================================
+# SUMMARIES
+# ============================================================
 st.markdown("## Catalogue QC — Avg Score by Market & Catalogue Agent")
 cat_summary = (
     cat_rows.dropna(subset=["score_pct"])
