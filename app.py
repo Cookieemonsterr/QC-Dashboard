@@ -423,7 +423,7 @@ with c2:
 
 # 3️⃣ Tickets by City
 with c3:
-    st.markdown("### Tickets by City (excluding Unknown)")
+    st.markdown("### Tickets by City")
     city_series = tf["city"].dropna().astype(str).str.strip()
     city_series = city_series[
         (city_series != "")
