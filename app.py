@@ -1,7 +1,9 @@
+
 import re
 import html
 import time
 from collections import defaultdict
+
 import pandas as pd
 import plotly.express as px
 import streamlit as st
@@ -47,9 +49,7 @@ hr{ border:none; border-top:1px solid var(--hr); margin:.9rem 0; }
 """
 st.markdown(CSS, unsafe_allow_html=True)
 
-# ============================================================
-# HELPERS
-# ============================================================
+
 def normalize_header(h: str) -> str:
     h = "" if h is None else str(h)
     h = html.unescape(h)
@@ -75,7 +75,6 @@ def to_pct(series: pd.Series) -> pd.Series:
     s = pd.to_numeric(s, errors="coerce")
     if s.dropna().empty:
         return s
-    # if looks like fraction, scale to %
     if (s.dropna() <= 1.5).mean() > 0.7:
         s = s * 100
     return s
@@ -130,7 +129,6 @@ def collapse_overall(df: pd.DataFrame) -> pd.DataFrame:
     if c_agent: agg[c_agent] = unique_join
     if s_agent: agg[s_agent] = first_non_empty
 
-    # keep everything else first non-empty
     for col in df.columns:
         if col == ref or col in agg:
             continue
@@ -139,6 +137,7 @@ def collapse_overall(df: pd.DataFrame) -> pd.DataFrame:
     out = df.groupby(ref, as_index=False).agg(agg)
     out.rename(columns={ref: "Reference ID"}, inplace=True)
     return out
+
 
 UPDATE_FORMS = {
     "Price Update",
@@ -162,11 +161,9 @@ def bucket_for_row(ticket_type: str, form_name: str) -> str | None:
     tt = (ticket_type or "").strip()
     fn = (form_name or "").strip()
 
-    # Studio KPIs
     if fn in STUDIO_FORMS:
         return "Studio"
 
-    # Total QC (Ticket) KPI
     if (tt == "Build Tickets") and (fn in BUILD_MAIN_FORMS):
         return "Total"
     if (tt == "Update Tickets") and (fn == "Update scorecard"):
@@ -174,13 +171,15 @@ def bucket_for_row(ticket_type: str, form_name: str) -> str | None:
     if (tt == "Existing Tickets") and (fn in EXISTING_MAIN_FORMS):
         return "Total"
 
-    # Catalogue KPI
     if (tt == "Update Tickets") and (fn in UPDATE_FORMS):
         return "Catalogue"
-    if (tt in {"Build Tickets", "Existing Tickets"}) and (fn in BUILD_MAIN_FORMS or fn == CATALOGUE_SCORECARD_FORM or fn in EXISTING_MAIN_FORMS):
+    if tt in {"Build Tickets", "Existing Tickets"} and (
+        fn in BUILD_MAIN_FORMS or fn == CATALOGUE_SCORECARD_FORM or fn in EXISTING_MAIN_FORMS
+    ):
         return "Catalogue"
 
     return None
+
 
 st.sidebar.markdown("## Data")
 if st.sidebar.button("Refresh data now"):
@@ -229,29 +228,33 @@ def load_data():
     ev["dt"] = pd.to_datetime(ev[dt_col], errors="coerce") if dt_col else pd.NaT
     ev["date"] = ev["dt"].dt.date
 
-    # map ticket type onto each eval row (from overall subject)
+    # map ticket type onto each eval row (from overall)
     ref_to_type = dict(zip(overall["__ref__"], overall["ticket_type"]))
     ev["ticket_type"] = ev["__ref__"].map(ref_to_type).fillna("Other")
 
     # bucket rows for KPIs
     ev["bucket"] = ev.apply(lambda r: bucket_for_row(r["ticket_type"], r["form_name"]), axis=1)
 
-    # join overall fields to eval rows (so filters like City/Market work)
+    # join overall fields to eval rows (so City/Market/Agent filters work)
     rows = ev.merge(overall, on="__ref__", how="left", suffixes=("", "_overall"))
 
-    # Build ticket-level table HAD LAL EMERGENCY KPI MA RA7 YESTA3MELO
+    # Ticket-level table (display only)
     per_cat = rows[rows["bucket"] == "Catalogue"].groupby("__ref__", as_index=False)["score_pct"].mean().rename(columns={"score_pct": "catalog_qc"})
     per_stu = rows[rows["bucket"] == "Studio"].groupby("__ref__", as_index=False)["score_pct"].mean().rename(columns={"score_pct": "studio_qc"})
     per_tot = rows[rows["bucket"] == "Total"].groupby("__ref__", as_index=False)["score_pct"].mean().rename(columns={"score_pct": "total_qc"})
-    sent_back_cat = rows.groupby("__ref__", as_index=False)["sent_back_catalog"].sum().rename(columns={"sent_back_catalog": "sent_back_to_catalog"})
 
-    tickets = overall.merge(sent_back_cat, on="__ref__", how="left")\
-                     .merge(per_cat, on="__ref__", how="left")\
-                     .merge(per_stu, on="__ref__", how="left")\
-                     .merge(per_tot, on="__ref__", how="left")
+    # Count sent-back events per ticket for table only (we'll compute KPIs as unique tickets later)
+    sent_back_cat_events = rows.groupby("__ref__", as_index=False)["sent_back_catalog"].sum().rename(columns={"sent_back_catalog": "sent_back_to_catalog_events"})
+
+    tickets = (
+        overall.merge(sent_back_cat_events, on="__ref__", how="left")
+        .merge(per_cat, on="__ref__", how="left")
+        .merge(per_stu, on="__ref__", how="left")
+        .merge(per_tot, on="__ref__", how="left")
+    )
 
     tickets["ticket_id"] = tickets["Reference ID"].astype(str)
-    tickets["sent_back_to_catalog"] = pd.to_numeric(tickets["sent_back_to_catalog"], errors="coerce").fillna(0).astype(int)
+    tickets["sent_back_to_catalog_events"] = pd.to_numeric(tickets["sent_back_to_catalog_events"], errors="coerce").fillna(0).astype(int)
 
     return rows, tickets
 
@@ -259,6 +262,7 @@ t0 = time.time()
 with st.spinner("Loading…"):
     rows_df, tickets_df = load_data()
 st.caption(f"Loaded in {time.time()-t0:.2f}s")
+
 
 st.sidebar.markdown("## Filters")
 
@@ -279,7 +283,6 @@ sel_market = st.sidebar.multiselect("Market", markets, default=[])
 sel_catalog_agent = st.sidebar.multiselect("Catalogue Agent", catalog_agents, default=[])
 sel_studio_agent = st.sidebar.multiselect("Studio Agent", studio_agents, default=[])
 
-#FILTERS LAL KPI
 rf = rows_df.copy()
 
 if ticket_view != "All":
@@ -301,7 +304,6 @@ if sel_catalog_agent:
 if sel_studio_agent:
     rf = rf[rf["studio_agent"].isin(sel_studio_agent)]
 
-# tickets table follows same filter
 allowed_refs = set(rf["__ref__"].dropna().astype(str))
 tf = tickets_df[tickets_df["__ref__"].astype(str).isin(allowed_refs)].copy()
 
@@ -321,36 +323,47 @@ with top_right:
 
 st.markdown("<hr/>", unsafe_allow_html=True)
 
+
 k1, k2, k3, k4, k5 = st.columns(5)
 
-cat_rows = rf[rf["bucket"] == "Catalogue"]
-stu_rows = rf[rf["bucket"] == "Studio"]
-tot_rows = rf[rf["bucket"] == "Total"]
+cat_rows = rf[rf["bucket"] == "Catalogue"].copy()
+stu_rows = rf[rf["bucket"] == "Studio"].copy()
+tot_rows = rf[rf["bucket"] == "Total"].copy()
 
 cat_avg = mean_pct(cat_rows["score_pct"])
 stu_avg = mean_pct(stu_rows["score_pct"])
 tot_avg = mean_pct(tot_rows["score_pct"])
 
-sent_back_to_catalog = int(pd.to_numeric(rf["sent_back_catalog"], errors="coerce").fillna(0).sum())
-sent_back_to_studio = int(pd.to_numeric(stu_rows["sent_back_catalog"], errors="coerce").fillna(0).sum())
+sent_back_catalog_tickets = (
+    cat_rows.groupby("__ref__")["sent_back_catalog"].max().fillna(0).gt(0).sum()
+)
+sent_back_studio_tickets = (
+    stu_rows.groupby("__ref__")["sent_back_catalog"].max().fillna(0).gt(0).sum()
+)
 
 with k1: kpi_card("Catalog QC", "—" if cat_avg is None else f"{cat_avg:.2f}%")
 with k2: kpi_card("Studio QC", "—" if stu_avg is None else f"{stu_avg:.2f}%")
 with k3: kpi_card("Total QC (Ticket)", "—" if tot_avg is None else f"{tot_avg:.2f}%")
-with k4: kpi_card("Sent Back → Catalog", f"{sent_back_to_catalog:,}")
-with k5: kpi_card("Sent Back → Studio", f"{sent_back_to_studio:,}")
+with k4: kpi_card("Sent Back → Catalog (Tickets)", f"{int(sent_back_catalog_tickets):,}")
+with k5: kpi_card("Sent Back → Studio (Tickets)", f"{int(sent_back_studio_tickets):,}")
 
 st.markdown("<br/>", unsafe_allow_html=True)
 
 
 left, right = st.columns([0.62, 0.38])
 
+cat_flag = cat_rows.groupby("__ref__")["sent_back_catalog"].max().fillna(0).gt(0)
+stu_flag = stu_rows.groupby("__ref__")["sent_back_catalog"].max().fillna(0).gt(0)
+
+tf["Sent Back → Catalog"] = tf["__ref__"].map(cat_flag).fillna(False).map(lambda x: "Yes" if x else "No")
+tf["Sent Back → Studio"] = tf["__ref__"].map(stu_flag).fillna(False).map(lambda x: "Yes" if x else "No")
+
 with left:
     st.markdown("## Tickets")
     show_cols = [
         "ticket_id",
         "ticket_type",
-        "ticket_type_from_raw_data",
+        "ticket_type_raw",
         "city",
         "market",
         "catalog_agent",
@@ -358,7 +371,9 @@ with left:
         "catalog_qc",
         "studio_qc",
         "total_qc",
-        "sent_back_to_catalog",
+        "Sent Back → Catalog",
+        "Sent Back → Studio",
+        "sent_back_to_catalog_events",
     ]
     show_cols = [c for c in show_cols if c in tf.columns]
     st.dataframe(
@@ -383,3 +398,48 @@ with right:
         fig = px.line(daily, x="date_only", y="score_pct", markers=True)
         fig.update_layout(height=520, margin=dict(l=10, r=10, t=10, b=10), xaxis_title="", yaxis_title="")
         st.plotly_chart(fig, use_container_width=True)
+
+st.markdown("<br/>", unsafe_allow_html=True)
+
+
+st.markdown("## Catalogue QC — Avg Score by Market & Catalogue Agent")
+cat_summary = (
+    cat_rows.dropna(subset=["score_pct"])
+    .groupby(["market", "catalog_agent"], as_index=False)
+    .agg(
+        avg_score=("score_pct", "mean"),
+        tickets=("__ref__", "nunique"),
+        sent_back_tickets=("__ref__", lambda s: (cat_rows.loc[s.index].groupby("__ref__")["sent_back_catalog"].max().fillna(0).gt(0)).any().sum()),
+    )
+    .sort_values(["avg_score", "tickets"], ascending=[False, False])
+)
+
+st.dataframe(
+    cat_summary,
+    use_container_width=True,
+    height=420,
+    column_config={
+        "avg_score": st.column_config.NumberColumn("Avg Score", format="%.2f%%"),
+    },
+)
+
+st.markdown("## Studio QC — Avg Score by Market & Studio Agent")
+stu_summary = (
+    stu_rows.dropna(subset=["score_pct"])
+    .groupby(["market", "studio_agent"], as_index=False)
+    .agg(
+        avg_score=("score_pct", "mean"),
+        tickets=("__ref__", "nunique"),
+        sent_back_tickets=("__ref__", lambda s: (stu_rows.loc[s.index].groupby("__ref__")["sent_back_catalog"].max().fillna(0).gt(0)).any().sum()),
+    )
+    .sort_values(["avg_score", "tickets"], ascending=[False, False])
+)
+
+st.dataframe(
+    stu_summary,
+    use_container_width=True,
+    height=420,
+    column_config={
+        "avg_score": st.column_config.NumberColumn("Avg Score", format="%.2f%%"),
+    },
+)
