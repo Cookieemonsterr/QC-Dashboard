@@ -391,6 +391,60 @@ st.markdown("<br/>", unsafe_allow_html=True)
 
 
 left, right = st.columns([0.62, 0.38])
+#charts
+st.markdown("## Insights")
+
+c1, c2, c3 = st.columns([0.34, 0.33, 0.33])
+
+# 1️⃣ Ticket Type Split (unique tickets)
+with c1:
+    st.markdown("### Ticket type split")
+    tt = tf["ticket_type"].fillna("Other").value_counts().reset_index()
+    tt.columns = ["ticket_type", "count"]
+    fig = px.pie(tt, names="ticket_type", values="count", hole=0.55)
+    fig.update_layout(height=320, margin=dict(l=10, r=10, t=10, b=10))
+    st.plotly_chart(fig, use_container_width=True)
+
+# 2️⃣ Score Distribution (evaluation rows)
+with c2:
+    st.markdown("### Score distribution")
+    s = pd.to_numeric(rf["score_pct"], errors="coerce").dropna()
+    if s.empty:
+        st.info("No score values available.")
+    else:
+        fig = px.histogram(x=s, nbins=20)
+        fig.update_layout(
+            height=320,
+            margin=dict(l=10, r=10, t=10, b=10),
+            xaxis_title="Score (%)",
+            yaxis_title="Rows",
+        )
+        st.plotly_chart(fig, use_container_width=True)
+
+# 3️⃣ Tickets by City
+with c3:
+    st.markdown("### Tickets by City (excluding Unknown)")
+    city_series = tf["city"].dropna().astype(str).str.strip()
+    city_series = city_series[
+        (city_series != "")
+        & (city_series.str.lower() != "nan")
+        & (city_series.str.lower() != "unknown")
+    ]
+
+    city_counts = city_series.value_counts().reset_index()
+    city_counts.columns = ["city", "ticket_count"]
+
+    if city_counts.empty:
+        st.info("No city data available.")
+    else:
+        fig = px.bar(city_counts.head(20), x="city", y="ticket_count")
+        fig.update_layout(
+            height=320,
+            margin=dict(l=10, r=10, t=10, b=10),
+            xaxis_title="",
+            yaxis_title="Tickets",
+        )
+        st.plotly_chart(fig, use_container_width=True)
 
 cat_flag = cat_rows.groupby("__ref__")["sent_back_catalog"].max().fillna(0).gt(0)
 stu_flag = stu_rows.groupby("__ref__")["sent_back_catalog"].max().fillna(0).gt(0)
