@@ -189,7 +189,6 @@ if st.sidebar.button("Refresh data now"):
 
 @st.cache_data(show_spinner=False, ttl=600)
 def load_data():
-    # Overall
     overall = pd.read_csv(BASE_PATH, low_memory=False)
     overall.columns = make_unique([normalize_header(c) for c in overall.columns])
     overall = collapse_overall(overall)
