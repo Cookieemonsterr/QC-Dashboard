@@ -2,6 +2,7 @@ import re
 import html
 import time
 from collections import defaultdict
+from pathlib import Path
 
 import pandas as pd
 import plotly.express as px
@@ -9,6 +10,8 @@ import streamlit as st
 
 BASE_PATH = "istep_data.csv"
 REPORT_PATH = "Evaluation Report Istep - Report.csv"
+AGENT_SCORES_PATH = "Agent Scores.csv"
+CITY_STATS_PATH = "Tickets by City.csv"
 
 st.set_page_config(page_title="QC Scores Dashboard", page_icon="✅", layout="wide")
 
@@ -44,6 +47,7 @@ html[data-theme="light"]{
 .kpi .value{ font-size:2.05rem; font-weight:900; line-height:1.1; }
 
 hr{ border:none; border-top:1px solid var(--hr); margin:.9rem 0; }
+.small-muted{ color: var(--muted); font-size: .9rem; }
 </style>
 """
 st.markdown(CSS, unsafe_allow_html=True)
@@ -76,6 +80,7 @@ def to_pct(series: pd.Series) -> pd.Series:
     s = pd.to_numeric(s, errors="coerce")
     if s.dropna().empty:
         return s
+    # If values look like 0.xx then scale to %
     if (s.dropna() <= 1.5).mean() > 0.7:
         s = s * 100
     return s
@@ -94,6 +99,39 @@ def first_non_empty(series: pd.Series):
     s = series.dropna().astype(str).str.strip()
     s = s[(s != "") & (s.str.lower() != "nan")]
     return s.iloc[0] if len(s) else pd.NA
+
+def read_multiheader_kpi_csv(path: str) -> pd.DataFrame:
+    """
+    Reads files like Agent Scores.csv / Tickets by City.csv which have 2 header rows:
+    Row1: Name, Total Tickets Resolved, , Total Average QC Score,
+    Row2: , Monthly, Weekly, Monthly, Weekly
+    """
+    df = pd.read_csv(path, header=[0, 1])
+    cols = []
+    for a, b in df.columns:
+        a = normalize_header(a)
+        b = normalize_header(b)
+        if b.startswith("Unnamed"):
+            b = ""
+        if a.startswith("Unnamed"):
+            a = ""
+        name = " ".join([x for x in [a, b] if x]).strip()
+        cols.append(name if name else f"col_{len(cols)}")
+    df.columns = cols
+
+    # Normalize common expected columns
+    # Example output names:
+    # Name
+    # Total Tickets Resolved Monthly
+    # Total Tickets Resolved Weekly
+    # Total Average QC Score Monthly
+    # Total Average QC Score Weekly
+    return df
+
+def file_exists_or_stop(path: str, label: str):
+    if not Path(path).exists():
+        st.error(f"Missing file: **{path}** ({label}). Upload it to the repo root (same folder as app.py).")
+        st.stop()
 
 # Ticket type from Subject (Overall)
 def map_ticket_type_from_subject(subject: str) -> str:
@@ -130,7 +168,7 @@ def collapse_overall(df: pd.DataFrame) -> pd.DataFrame:
     return out
 
 # ============================================================
-# FORMS
+# FORMS / BUCKETS
 # ============================================================
 STUDIO_FORMS = {"Studio scorecard", "Images Update"}
 
@@ -157,7 +195,6 @@ def bucket_for_row(ticket_type: str, form_name: str):
     if (tt == "Existing Tickets") and (fn in EXISTING_MAIN_FORMS):
         return "Total"
 
-    # (Catalogue bucket is not used for KPI anymore; KPI uses non-studio)
     return None
 
 # ============================================================
@@ -169,7 +206,13 @@ if st.sidebar.button("Refresh data now"):
 
 @st.cache_data(show_spinner=False, ttl=600)
 def load_data():
-    # ---- Overall (for city/market/subject + ticket type mapping only)
+    # Ensure files exist
+    file_exists_or_stop(BASE_PATH, "overall / metadata")
+    file_exists_or_stop(REPORT_PATH, "evaluation (scores)")
+    file_exists_or_stop(AGENT_SCORES_PATH, "agent scores (source of truth)")
+    file_exists_or_stop(CITY_STATS_PATH, "tickets by city (source of truth)")
+
+    # ---- Overall (ticket meta + market/city)
     overall = pd.read_csv(BASE_PATH, low_memory=False)
     overall.columns = make_unique([normalize_header(c) for c in overall.columns])
     overall = collapse_overall(overall)
@@ -185,12 +228,12 @@ def load_data():
     overall["city"] = overall[city_col] if city_col else pd.NA
     overall["market"] = overall[market_col] if market_col else pd.NA
 
-    # ---- Evaluation Report (SOURCE OF TRUTH)
+    # ---- Evaluation Report (SOURCE OF TRUTH FOR SCORES)
     ev = pd.read_csv(REPORT_PATH, low_memory=False)
     ev.columns = make_unique([normalize_header(c) for c in ev.columns])
 
     ref_col = safe_col(ev, ["Reference ID"])
-    name_col = safe_col(ev, ["Name"])   # MUST be this for matching Sheets
+    name_col = safe_col(ev, ["Name"])
     form_col = safe_col(ev, ["Form Name"])
     score_col = safe_col(ev, ["Score"])
     sb_col = safe_col(ev, ["Back To Cat", "Sent Back To Cat", "Sent Back To Catalog"])
@@ -199,15 +242,14 @@ def load_data():
     if not ref_col or not form_col or not score_col:
         raise RuntimeError("Evaluation report must contain: Reference ID, Form Name, Score")
     if not name_col:
-        raise RuntimeError("Evaluation report must contain: Name (agent name)")
+        raise RuntimeError("Evaluation report must contain: Name")
 
     ev = ev.copy()
     ev["__ref__"] = ev[ref_col].astype(str).str.strip()
-    ev["agent_name"] = ev[name_col].astype(str).str.strip()  # ✅ EXACTLY what Sheets uses
+    ev["agent_name"] = ev[name_col].astype(str).str.strip()
     ev["form_name"] = ev[form_col].astype(str).str.strip()
     ev["score_pct"] = to_pct(ev[score_col])
 
-    # Sent-back column can be named differently in your exports
     if sb_col:
         ev["sent_back_catalog"] = pd.to_numeric(ev[sb_col], errors="coerce").fillna(0)
     else:
@@ -216,41 +258,37 @@ def load_data():
     ev["dt"] = pd.to_datetime(ev[dt_col], errors="coerce") if dt_col else pd.NaT
     ev["date"] = ev["dt"].dt.date
 
-    # ticket type from overall mapping (needed for your Total logic and ticket split)
+    # Ticket type mapping from overall (needed for Total logic + ticket split)
     ref_to_type = dict(zip(overall["__ref__"], overall["ticket_type"]))
     ev["ticket_type"] = ev["__ref__"].map(ref_to_type).fillna("Other")
 
     # buckets + studio flags
     ev["bucket"] = ev.apply(lambda r: bucket_for_row(r["ticket_type"], r["form_name"]), axis=1)
     ev["is_studio"] = ev["form_name"].isin(STUDIO_FORMS)
-    ev["is_non_studio"] = ~ev["is_studio"]  # ✅ Catalog QC = everything except studio
+    ev["is_non_studio"] = ~ev["is_studio"]  # Catalog QC = everything except studio
 
-    # Join overall fields (city/market) onto eval rows
+    # Join market/city onto eval rows (for filtering + market splits)
     rows = ev.merge(
         overall[["__ref__", "Reference ID", "Subject", "ticket_type_raw", "ticket_type", "city", "market"]],
         on="__ref__",
         how="left",
     )
-
-    # IMPORTANT: never drop rows from grouping because market/city missing
     rows["market"] = rows["market"].fillna("Unknown")
     rows["city"] = rows["city"].fillna("Unknown")
 
-    # ---- Ticket-level table (means per ticket, not per row)
+    # ---- Ticket-level table scores (per ticket averages)
     per_cat = (
         rows[rows["is_non_studio"]]
         .groupby("__ref__", as_index=False)["score_pct"]
         .mean()
         .rename(columns={"score_pct": "catalog_qc"})
     )
-
     per_stu = (
         rows[rows["is_studio"]]
         .groupby("__ref__", as_index=False)["score_pct"]
         .mean()
         .rename(columns={"score_pct": "studio_qc"})
     )
-
     per_tot = (
         rows[rows["bucket"] == "Total"]
         .groupby("__ref__", as_index=False)["score_pct"]
@@ -270,17 +308,33 @@ def load_data():
         .merge(per_stu, on="__ref__", how="left")
         .merge(per_tot, on="__ref__", how="left")
     )
-
     tickets["ticket_id"] = tickets["Reference ID"].astype(str)
     tickets["sent_back_to_catalog_events"] = pd.to_numeric(
         tickets["sent_back_to_catalog_events"], errors="coerce"
     ).fillna(0).astype(int)
 
-    return rows, tickets
+    # ---- Agent scores (SOURCE OF TRUTH)
+    agent_scores = read_multiheader_kpi_csv(AGENT_SCORES_PATH)
+    # clean numbers
+    for c in agent_scores.columns:
+        if "Score" in c:
+            agent_scores[c] = pd.to_numeric(agent_scores[c].astype(str).str.replace("%", "", regex=False).replace("-", pd.NA), errors="coerce")
+        if "Tickets" in c:
+            agent_scores[c] = pd.to_numeric(agent_scores[c].astype(str).replace("-", pd.NA), errors="coerce")
+
+    # ---- City stats (SOURCE OF TRUTH)
+    city_stats = read_multiheader_kpi_csv(CITY_STATS_PATH)
+    for c in city_stats.columns:
+        if "Score" in c:
+            city_stats[c] = pd.to_numeric(city_stats[c].astype(str).str.replace("%", "", regex=False).replace("-", pd.NA), errors="coerce")
+        if "Tickets" in c:
+            city_stats[c] = pd.to_numeric(city_stats[c].astype(str).replace("-", pd.NA), errors="coerce")
+
+    return rows, tickets, agent_scores, city_stats
 
 t0 = time.time()
 with st.spinner("Loading…"):
-    rows_df, tickets_df = load_data()
+    rows_df, tickets_df, agent_scores_df, city_stats_df = load_data()
 st.caption(f"Loaded in {time.time()-t0:.2f}s")
 
 # ============================================================
@@ -300,13 +354,9 @@ date_range = st.sidebar.date_input("Date range", value=default_range)
 cities = sorted([c for c in rows_df["city"].dropna().astype(str).unique() if c and c.lower() != "nan"])
 markets = sorted([m for m in rows_df["market"].dropna().astype(str).unique() if m and m.lower() != "nan"])
 
-# ✅ Agents MUST come from Evaluation Report "Name" to match Sheets
-catalog_agents = sorted(
-    rows_df[rows_df["is_non_studio"]]["agent_name"].dropna().astype(str).unique()
-)
-studio_agents = sorted(
-    rows_df[rows_df["is_studio"]]["agent_name"].dropna().astype(str).unique()
-)
+# Agents for filtering come from Evaluation Report Name (so it matches the sheet names exactly)
+catalog_agents = sorted(rows_df[rows_df["is_non_studio"]]["agent_name"].dropna().astype(str).unique())
+studio_agents = sorted(rows_df[rows_df["is_studio"]]["agent_name"].dropna().astype(str).unique())
 
 sel_city = st.sidebar.multiselect("City", cities, default=[])
 sel_market = st.sidebar.multiselect("Market", markets, default=[])
@@ -330,7 +380,7 @@ if sel_city:
 if sel_market:
     rf = rf[rf["market"].isin(sel_market)]
 
-# ✅ Apply agent filters on correct row-sets
+# Apply agent filters (only constrain relevant side)
 if sel_catalog_agent:
     rf = rf[~rf["is_non_studio"] | rf["agent_name"].isin(sel_catalog_agent)]
 if sel_studio_agent:
@@ -345,6 +395,7 @@ tf = tickets_df[tickets_df["__ref__"].astype(str).isin(allowed_refs)].copy()
 top_left, top_right = st.columns([0.72, 0.28], vertical_alignment="center")
 with top_left:
     st.markdown('<div class="qc-title">QC Scores Dashboard</div>', unsafe_allow_html=True)
+
 with top_right:
     st.download_button(
         "⬇️ Download filtered CSV",
@@ -369,7 +420,7 @@ cat_avg = mean_pct(cat_rows["score_pct"])
 stu_avg = mean_pct(stu_rows["score_pct"])
 tot_avg = mean_pct(tot_rows["score_pct"])
 
-# ✅ Sent-back counts = UNIQUE tickets, not events
+# Sent-back counts = UNIQUE tickets (not sum of events)
 sent_back_catalog_tickets = cat_rows.groupby("__ref__")["sent_back_catalog"].max().fillna(0).gt(0).sum()
 sent_back_studio_tickets = stu_rows.groupby("__ref__")["sent_back_catalog"].max().fillna(0).gt(0).sum()
 
@@ -385,6 +436,7 @@ st.markdown("<br/>", unsafe_allow_html=True)
 # INSIGHTS
 # ============================================================
 st.markdown("## Insights")
+
 c1, c2, c3 = st.columns([0.34, 0.33, 0.33])
 
 with c1:
@@ -396,7 +448,7 @@ with c1:
     st.plotly_chart(fig, use_container_width=True)
 
 with c2:
-    st.markdown("### Score distribution")
+    st.markdown("### Score distribution (Evaluation rows)")
     s = pd.to_numeric(rf["score_pct"], errors="coerce").dropna()
     if s.empty:
         st.info("No score values available.")
@@ -406,17 +458,21 @@ with c2:
         st.plotly_chart(fig, use_container_width=True)
 
 with c3:
-    st.markdown("### Tickets by City")
-    city_series = tf["city"].dropna().astype(str).str.strip()
-    city_series = city_series[(city_series != "") & (city_series.str.lower() != "nan") & (city_series.str.lower() != "unknown")]
-    city_counts = city_series.value_counts().reset_index()
-    city_counts.columns = ["city", "ticket_count"]
-    if city_counts.empty:
-        st.info("No city data available.")
-    else:
-        fig = px.bar(city_counts.head(20), x="city", y="ticket_count")
+    st.markdown("### Tickets by City (from Tickets by City.csv)")
+    city = city_stats_df.copy()
+    # Remove "Total" if present
+    if "City" in city.columns:
+        city = city[city["City"].astype(str).str.lower() != "total"].copy()
+
+    tickets_col = safe_col(city, ["Total Tickets Resolved Monthly", "Total Tickets Resolved"])
+    if tickets_col and "City" in city.columns:
+        city["tickets"] = pd.to_numeric(city[tickets_col], errors="coerce")
+        city = city.dropna(subset=["tickets"]).sort_values("tickets", ascending=False).head(20)
+        fig = px.bar(city, x="City", y="tickets")
         fig.update_layout(height=320, margin=dict(l=10, r=10, t=10, b=10), xaxis_title="", yaxis_title="Tickets")
         st.plotly_chart(fig, use_container_width=True)
+    else:
+        st.info("City stats file columns not recognized.")
 
 st.markdown("<br/>", unsafe_allow_html=True)
 
@@ -473,38 +529,48 @@ with right:
 st.markdown("<br/>", unsafe_allow_html=True)
 
 # ============================================================
-# SUMMARIES (MATCH SHEET LOGIC)
+# AGENT SCORES (SOURCE OF TRUTH)
 # ============================================================
-st.markdown("## Catalogue QC — Avg Score by Market & Agent (Evaluation Name)")
-cat_summary = (
-    cat_rows.dropna(subset=["score_pct"])
-    .groupby(["market", "agent_name"], as_index=False)
-    .agg(
-        avg_score=("score_pct", "mean"),
-        tickets=("__ref__", "nunique"),
-    )
-    .sort_values(["avg_score", "tickets"], ascending=[False, False])
-)
-st.dataframe(
-    cat_summary,
-    use_container_width=True,
-    height=420,
-    column_config={"avg_score": st.column_config.NumberColumn("Avg Score", format="%.2f%%")},
-)
+st.markdown("## Agent Scores (from Agent Scores.csv — source of truth)")
+st.markdown('<div class="small-muted">These values are displayed exactly as provided in Agent Scores.csv (no recalculation).</div>', unsafe_allow_html=True)
 
-st.markdown("## Studio QC — Avg Score by Market & Agent (Evaluation Name)")
-stu_summary = (
-    stu_rows.dropna(subset=["score_pct"])
-    .groupby(["market", "agent_name"], as_index=False)
-    .agg(
-        avg_score=("score_pct", "mean"),
-        tickets=("__ref__", "nunique"),
+a = agent_scores_df.copy()
+
+# Try to identify the right columns
+name_c = safe_col(a, ["Name"])
+tickets_m = safe_col(a, ["Total Tickets Resolved Monthly"])
+tickets_w = safe_col(a, ["Total Tickets Resolved Weekly"])
+score_m = safe_col(a, ["Total Average QC Score Monthly"])
+score_w = safe_col(a, ["Total Average QC Score Weekly"])
+
+if name_c and score_m:
+    view_cols = [c for c in [name_c, tickets_m, tickets_w, score_m, score_w] if c]
+    a = a[view_cols].copy()
+
+    # Clean '-' and sort by Monthly score if present
+    if score_m in a.columns:
+        a[score_m] = pd.to_numeric(a[score_m], errors="coerce")
+        a = a.sort_values(score_m, ascending=False)
+
+    st.dataframe(
+        a,
+        use_container_width=True,
+        height=520,
+        column_config={
+            score_m: st.column_config.NumberColumn("Avg QC Score (Monthly)", format="%.2f") if score_m else None,
+            score_w: st.column_config.NumberColumn("Avg QC Score (Weekly)", format="%.2f") if score_w else None,
+        },
     )
-    .sort_values(["avg_score", "tickets"], ascending=[False, False])
-)
-st.dataframe(
-    stu_summary,
-    use_container_width=True,
-    height=420,
-    column_config={"avg_score": st.column_config.NumberColumn("Avg Score", format="%.2f%%")},
-)
+else:
+    st.warning("Agent Scores.csv columns not recognized. Please keep the original export format.")
+
+# ============================================================
+# DEBUG PANEL (optional but useful)
+# ============================================================
+with st.expander("🔎 Debug (quick sanity check)"):
+    st.write("Rows loaded (Evaluation):", len(rows_df))
+    st.write("Tickets loaded (Unique Reference IDs):", len(tickets_df))
+    st.write("Filtered eval rows:", len(rf))
+    st.write("Filtered tickets:", len(tf))
+    st.write("Agent scores rows:", len(agent_scores_df))
+    st.write("City stats rows:", len(city_stats_df))
