@@ -350,9 +350,19 @@ def load_data(mode: str):
     ev["is_non_studio"] = ~ev["is_studio"]  # Catalog QC = everything except studio
 
     rows = ev.merge(
-        overall[["__ref__", "Reference ID", "Subject", "ticket_type_raw", "ticket_type", "city", "market"]],
-        on="__ref__", how="left"
-    )
+    overall[["__ref__", "Reference ID", "Subject", "ticket_type_raw", "city", "market"]],
+    on="__ref__",
+    how="left",
+)
+
+# ✅ Ensure stable column names (avoid ticket_type_x / ticket_type_y issues)
+# ticket_type should always come from ev (already mapped)
+if "ticket_type" not in rows.columns:
+    # fallback if your file somehow produced suffixes
+    for c in ["ticket_type_x", "ticket_type_y"]:
+        if c in rows.columns:
+            rows["ticket_type"] = rows[c]
+            break
     rows["market"] = rows["market"].fillna("Unknown")
     rows["city"] = rows["city"].fillna("Unknown")
 
