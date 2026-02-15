@@ -592,14 +592,13 @@ with c2:
     # Choose report source based on ticket filter
     if ticket_view == "Update Tickets":
         src = update_df
-        st.caption(f"Source: Update Tickets report ({mode}).")
     elif ticket_view in ["Build Tickets", "Existing Tickets"]:
         # Existing is included in build report (your rule)
         src = build_df
-        st.caption(f"Source: Build Tickets report (includes Existing) ({mode}).")
+        st.caption(f"Build Tickets ({mode}).")
     else:
         src = city_stats_df
-        st.caption(f"Source: Tickets by City report ({mode}).")
+        st.caption(f"Scores by City ({mode}).")
 
     cm = city_metrics_from_report(src, mode)
 
@@ -627,14 +626,10 @@ with c3:
 
     if ticket_view == "Update Tickets":
         src = update_df
-        st.caption(f"Source: Update Tickets report ({mode}).")
     elif ticket_view in ["Build Tickets", "Existing Tickets"]:
         src = build_df
-        st.caption(f"Source: Build Tickets report (includes Existing) ({mode}).")
     else:
         src = city_stats_df
-        st.caption(f"Source: Tickets by City report ({mode}).")
-
     cm = city_metrics_from_report(src, mode)
 
     if cm is None or "tickets" not in cm.columns:
