@@ -558,30 +558,44 @@ c1, c2, c3 = st.columns([0.34, 0.33, 0.33])
 with c1:
     st.markdown("### Ticket type split")
 
-    if (not filters_applied) and (build_total is not None) and (update_total is not None):
-        # Build_total already INCLUDES Existing (as you said)
-        counts = {
-            "Build Tickets (incl. Existing)": int(build_total),
-            "Update Tickets": int(update_total),
-        }
+    # We ONLY show Build + Update.
+    # Existing is NOT shown because it's included in Build KPI export.
 
-        # Add only non-(Build/Update/Existing) buckets from evaluation-derived tickets
-        rest = tf["ticket_type"].fillna("Other").value_counts().to_dict()
-        for k, v in rest.items():
-            if k in ["Build Tickets", "Update Tickets", "Existing Tickets"]:
-                continue
-            counts[k] = int(v)
+    def tickets_total_from_city_table(df: pd.DataFrame, mode: str, selected_cities: list[str]) -> int | None:
+        cm = city_metrics_from_report(df, mode)
+        if cm is None or "tickets" not in cm.columns:
+            return None
+        cm = apply_city_filter_to_city_table(cm, selected_cities)  # respects City filter
+        if cm is None or cm.empty:
+            return 0
+        return int(pd.to_numeric(cm["tickets"], errors="coerce").fillna(0).sum())
 
-        tt = pd.DataFrame({"ticket_type": list(counts.keys()), "count": list(counts.values())})
-        st.caption(f"Using Build/Update totals from KPI exports ({mode}).")
+    # Prefer city-filtered KPI totals if City filter is selected
+    if sel_city:
+        b = tickets_total_from_city_table(build_df, mode, sel_city)
+        u = tickets_total_from_city_table(update_df, mode, sel_city)
+        st.caption(f"Using KPI exports by City ({mode}) (City filter applied).")
     else:
-        tt = tf["ticket_type"].fillna("Other").value_counts().reset_index()
-        tt.columns = ["ticket_type", "count"]
+        # Otherwise use report totals (Total row / summed column)
+        b = build_total
+        u = update_total
+        st.caption(f"Using KPI export totals ({mode}).")
+
+    # Safety fallback if something is missing
+    if b is None or u is None:
+        st.warning("Could not read Build/Update totals from KPI exports. Check the CSV export format.")
+        # last-resort fallback: count from filtered tickets (may not match iStep)
+        tmp = tf["ticket_type"].fillna("Other").value_counts().to_dict()
+        b = int(tmp.get("Build Tickets", 0) + tmp.get("Existing Tickets", 0))
+        u = int(tmp.get("Update Tickets", 0))
+
+    tt = pd.DataFrame(
+        {"ticket_type": ["Build Tickets", "Update Tickets"], "count": [int(b), int(u)]}
+    )
 
     fig = px.pie(tt, names="ticket_type", values="count", hole=0.55)
     fig.update_layout(height=320, margin=dict(l=10, r=10, t=10, b=10))
     st.plotly_chart(fig, use_container_width=True)
-
 # -------------------------
 # Avg QC Score by City (source-of-truth)
 # -------------------------
