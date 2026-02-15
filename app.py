@@ -577,7 +577,6 @@ with c1:
     else:
         tt = tf["ticket_type"].fillna("Other").value_counts().reset_index()
         tt.columns = ["ticket_type", "count"]
-        st.caption("Filtered view: split recalculated from filtered tickets.")
 
     fig = px.pie(tt, names="ticket_type", values="count", hole=0.55)
     fig.update_layout(height=320, margin=dict(l=10, r=10, t=10, b=10))
