@@ -134,7 +134,6 @@ def read_kpi_csv(path: str) -> pd.DataFrame:
                 name = " ".join([x for x in [a, b] if x]).strip()
                 cols.append(name if name else f"col_{len(cols)}")
             df.columns = make_unique(cols)
-            # drop fully-empty columns (common in exports)
             df = df.dropna(axis=1, how="all")
             return df
     except Exception:
@@ -142,7 +141,6 @@ def read_kpi_csv(path: str) -> pd.DataFrame:
 
     df = pd.read_csv(path)
     df.columns = make_unique(df.columns)
-    # drop unnamed columns (empty spacer columns from sheets export)
     df = df.loc[:, [c for c in df.columns if not c.lower().startswith("unnamed")]]
     df = df.dropna(axis=1, how="all")
     return df
@@ -166,7 +164,6 @@ def extract_total_tickets_from_report(df: pd.DataFrame, mode: str = "Monthly") -
     tcol = safe_col(df, candidates)
 
     if not tcol:
-        # fallback: first numeric-ish column
         num_cols = []
         for c in df.columns:
             s = pd.to_numeric(df[c].astype(str).str.replace(",", "", regex=False), errors="coerce")
@@ -191,6 +188,62 @@ def extract_total_tickets_from_report(df: pd.DataFrame, mode: str = "Monthly") -
     if vals.empty:
         return None
     return int(vals.sum())
+
+def city_metrics_from_report(df: pd.DataFrame, mode: str) -> pd.DataFrame | None:
+    """
+    Returns: City | tickets | avg_score (if columns exist)
+    Works for Tickets by City / Build Tickets / Update Tickets reports.
+    """
+    city_col = safe_col(df, ["City", "city", "CITY"])
+    tickets_col = safe_col(
+        df,
+        [
+            f"Total Tickets Resolved {mode}",
+            "Total Tickets Resolved",
+            f"Tickets {mode}",
+            "Tickets",
+            "Ticket Count",
+            "ticket_count",
+        ],
+    )
+    score_col = safe_col(
+        df,
+        [
+            f"Total Average QC Score {mode}",
+            "Total Average QC Score",
+            f"Average QC Score {mode}",
+            "Average QC Score",
+        ],
+    )
+
+    if not city_col:
+        return None
+
+    cols = [city_col]
+    if tickets_col:
+        cols.append(tickets_col)
+    if score_col:
+        cols.append(score_col)
+
+    out = df[cols].copy()
+
+    rename_map = {city_col: "City"}
+    if tickets_col:
+        rename_map[tickets_col] = "tickets"
+    if score_col:
+        rename_map[score_col] = "avg_score"
+    out = out.rename(columns=rename_map)
+
+    out["City"] = out["City"].astype(str).str.strip()
+    out = out[~out["City"].str.lower().isin(["total", "unknown", "nan", ""])]
+
+    if "tickets" in out.columns:
+        out["tickets"] = pd.to_numeric(out["tickets"], errors="coerce").fillna(0).astype(int)
+    if "avg_score" in out.columns:
+        out["avg_score"] = pd.to_numeric(out["avg_score"], errors="coerce")
+
+    out = out.dropna(axis=0, how="all")
+    return out
 
 # Ticket type from Subject (overall export)
 def map_ticket_type_from_subject(subject: str) -> str:
@@ -338,7 +391,6 @@ def load_data(mode: str):
         suffixes=("", "_overall"),
     )
 
-    # Guarantee stable columns
     if "ticket_type" not in rows.columns:
         rows["ticket_type"] = "Other"
     rows["market"] = rows["market"].fillna("Unknown")
@@ -362,19 +414,40 @@ def load_data(mode: str):
 
     # Source of truth files
     city_stats = read_kpi_csv(CITY_STATS_PATH)
-    build_df = read_kpi_csv(BUILD_TICKETS_PATH)
+    build_df = read_kpi_csv(BUILD_TICKETS_PATH)   # includes Existing
     update_df = read_kpi_csv(UPDATE_TICKETS_PATH)
+
     build_total = extract_total_tickets_from_report(build_df, mode=mode)
     update_total = extract_total_tickets_from_report(update_df, mode=mode)
 
     catalog_agent_scores = read_kpi_csv(CATALOG_AGENT_SCORES_PATH)
     studio_agent_scores = read_kpi_csv(STUDIO_AGENT_SCORES_PATH)
 
-    return rows, tickets, city_stats, build_total, update_total, catalog_agent_scores, studio_agent_scores
+    return (
+        rows,
+        tickets,
+        city_stats,
+        build_df,
+        update_df,
+        build_total,
+        update_total,
+        catalog_agent_scores,
+        studio_agent_scores,
+    )
 
 t0 = time.time()
 with st.spinner("Loading…"):
-    rows_df, tickets_df, city_stats_df, build_total, update_total, catalog_agent_scores_df, studio_agent_scores_df = load_data(mode)
+    (
+        rows_df,
+        tickets_df,
+        city_stats_df,
+        build_df,
+        update_df,
+        build_total,
+        update_total,
+        catalog_agent_scores_df,
+        studio_agent_scores_df,
+    ) = load_data(mode)
 st.caption(f"Loaded in {time.time()-t0:.2f}s")
 
 # ============================================================
@@ -402,7 +475,6 @@ sel_studio_agent = st.sidebar.multiselect("Studio Agent (Evaluation Name)", stud
 
 rf = rows_df.copy()
 
-# Avoid KeyError forever
 if "ticket_type" not in rf.columns:
     rf["ticket_type"] = "Other"
 
@@ -421,7 +493,6 @@ if sel_city:
 if sel_market:
     rf = rf[rf["market"].isin(sel_market)]
 
-# agent filters apply only to their relevant bucket set
 if sel_catalog_agent:
     rf = rf[~rf["is_non_studio"] | rf["agent_name"].isin(sel_catalog_agent)]
 if sel_studio_agent:
@@ -464,7 +535,6 @@ cat_avg = mean_pct(cat_rows["score_pct"])
 stu_avg = mean_pct(stu_rows["score_pct"])
 tot_avg = mean_pct(tot_rows["score_pct"])
 
-# Sent-back counts = UNIQUE tickets, not how many times
 sent_back_catalog_tickets = cat_rows.groupby("__ref__")["sent_back_catalog"].max().fillna(0).gt(0).sum()
 sent_back_studio_tickets = stu_rows.groupby("__ref__")["sent_back_catalog"].max().fillna(0).gt(0).sum()
 
@@ -482,18 +552,28 @@ st.markdown("<br/>", unsafe_allow_html=True)
 st.markdown("## Insights")
 c1, c2, c3 = st.columns([0.34, 0.33, 0.33])
 
+# -------------------------
+# Ticket type split
+# -------------------------
 with c1:
     st.markdown("### Ticket type split")
 
     if (not filters_applied) and (build_total is not None) and (update_total is not None):
-        counts = {"Build Tickets": int(build_total), "Update Tickets": int(update_total)}
+        # Build_total already INCLUDES Existing (as you said)
+        counts = {
+            "Build Tickets (incl. Existing)": int(build_total),
+            "Update Tickets": int(update_total),
+        }
+
+        # Add only non-(Build/Update/Existing) buckets from evaluation-derived tickets
         rest = tf["ticket_type"].fillna("Other").value_counts().to_dict()
         for k, v in rest.items():
-            if k not in counts:
-                counts[k] = int(v)
+            if k in ["Build Tickets", "Update Tickets", "Existing Tickets"]:
+                continue
+            counts[k] = int(v)
 
         tt = pd.DataFrame({"ticket_type": list(counts.keys()), "count": list(counts.values())})
-        st.caption(f"Using Build/Update counts from files ({mode}).")
+        st.caption(f"Using Build/Update totals from KPI exports ({mode}).")
     else:
         tt = tf["ticket_type"].fillna("Other").value_counts().reset_index()
         tt.columns = ["ticket_type", "count"]
@@ -503,36 +583,75 @@ with c1:
     fig.update_layout(height=320, margin=dict(l=10, r=10, t=10, b=10))
     st.plotly_chart(fig, use_container_width=True)
 
+# -------------------------
+# Avg QC Score by City (source-of-truth)
+# -------------------------
 with c2:
-    st.markdown("### Score distribution")
-    s = pd.to_numeric(rf["score_pct"], errors="coerce").dropna()
-    if s.empty:
-        st.info("No score values available.")
-    else:
-        fig = px.histogram(x=s, nbins=20)
-        fig.update_layout(height=320, margin=dict(l=10, r=10, t=10, b=10), xaxis_title="Score (%)", yaxis_title="Rows")
-        st.plotly_chart(fig, use_container_width=True)
+    st.markdown("### Avg QC Score by City")
 
+    # Choose report source based on ticket filter
+    if ticket_view == "Update Tickets":
+        src = update_df
+        st.caption(f"Source: Update Tickets report ({mode}).")
+    elif ticket_view in ["Build Tickets", "Existing Tickets"]:
+        # Existing is included in build report (your rule)
+        src = build_df
+        st.caption(f"Source: Build Tickets report (includes Existing) ({mode}).")
+    else:
+        src = city_stats_df
+        st.caption(f"Source: Tickets by City report ({mode}).")
+
+    cm = city_metrics_from_report(src, mode)
+
+    if cm is None or "avg_score" not in cm.columns:
+        st.info("Couldn’t detect the Avg QC Score column in this report export.")
+    else:
+        cm = cm.dropna(subset=["avg_score"]).sort_values("avg_score", ascending=False).head(20)
+        if cm.empty:
+            st.info("No city score data found.")
+        else:
+            fig = px.bar(cm, x="City", y="avg_score")
+            fig.update_layout(
+                height=320,
+                margin=dict(l=10, r=10, t=10, b=10),
+                xaxis_title="",
+                yaxis_title="Avg QC Score",
+            )
+            st.plotly_chart(fig, use_container_width=True)
+
+# -------------------------
+# Tickets by City (source-of-truth)
+# -------------------------
 with c3:
     st.markdown("### Tickets by City")
 
-    city = city_stats_df.copy()
-    city_col = safe_col(city, ["City", "city", "CITY"])
-    tickets_col = safe_col(city, [f"Total Tickets Resolved {mode}", "Total Tickets Resolved", "Ticket Count", "Tickets", "ticket_count"])
-
-    if not city_col or not tickets_col:
-        st.info("Tickets by City.csv columns not recognized.")
+    if ticket_view == "Update Tickets":
+        src = update_df
+        st.caption(f"Source: Update Tickets report ({mode}).")
+    elif ticket_view in ["Build Tickets", "Existing Tickets"]:
+        src = build_df
+        st.caption(f"Source: Build Tickets report (includes Existing) ({mode}).")
     else:
-        city = city[[city_col, tickets_col]].copy()
-        city.columns = make_unique(["City", "tickets"])  # always unique
-        city["City"] = city["City"].astype(str).str.strip()
-        city["tickets"] = pd.to_numeric(city["tickets"], errors="coerce").fillna(0).astype(int)
-        city = city[~city["City"].str.lower().isin(["total", "unknown", "nan", ""])]
-        city = city.sort_values("tickets", ascending=False).head(20)
+        src = city_stats_df
+        st.caption(f"Source: Tickets by City report ({mode}).")
 
-        fig = px.bar(city, x="City", y="tickets")
-        fig.update_layout(height=320, margin=dict(l=10, r=10, t=10, b=10), xaxis_title="", yaxis_title="Tickets")
-        st.plotly_chart(fig, use_container_width=True)
+    cm = city_metrics_from_report(src, mode)
+
+    if cm is None or "tickets" not in cm.columns:
+        st.info("Couldn’t detect the Tickets column in this report export.")
+    else:
+        cm = cm.sort_values("tickets", ascending=False).head(20)
+        if cm.empty:
+            st.info("No city ticket data found.")
+        else:
+            fig = px.bar(cm, x="City", y="tickets")
+            fig.update_layout(
+                height=320,
+                margin=dict(l=10, r=10, t=10, b=10),
+                xaxis_title="",
+                yaxis_title="Tickets",
+            )
+            st.plotly_chart(fig, use_container_width=True)
 
 st.markdown("<br/>", unsafe_allow_html=True)
 
@@ -609,7 +728,6 @@ def render_agent_scores(df: pd.DataFrame, title_hint: str):
     view_cols = [c for c in [name_c, tickets_c, score_c] if c]
     a = a[view_cols].copy()
 
-    # rename safely
     new_cols = ["Name"]
     if tickets_c:
         new_cols.append("Tickets")
