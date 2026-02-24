@@ -245,6 +245,82 @@ def city_metrics_from_report(df: pd.DataFrame, mode: str) -> pd.DataFrame | None
     out = out.dropna(axis=0, how="all")
     return out
 
+def extract_total_avg_score_from_kpi(df: pd.DataFrame, mode: str) -> float | None:
+    """
+    Returns the TOTAL avg QC score from a KPI export.
+    Tries:
+      1) Find 'Total' row in a key column (Name/City/Market/Agent...) and read the avg score column.
+      2) Else: compute weighted avg using tickets if available, otherwise simple mean.
+    """
+    key_col = safe_col(df, ["Name", "City", "Market", "Agent", "Agent Name"])
+    score_col = safe_col(
+        df,
+        [
+            f"Total Average QC Score {mode}",
+            "Total Average QC Score",
+            f"Average QC Score {mode}",
+            "Average QC Score",
+            "Avg QC Score",
+        ],
+    )
+    tickets_col = safe_col(
+        df,
+        [
+            f"Total Tickets Resolved {mode}",
+            "Total Tickets Resolved",
+            f"Tickets {mode}",
+            "Tickets",
+            "Ticket Count",
+            "ticket_count",
+        ],
+    )
+
+    if not score_col:
+        return None
+
+    if key_col:
+        mask_total = df[key_col].astype(str).str.strip().str.lower().eq("total")
+        if mask_total.any():
+            v = pd.to_numeric(df.loc[mask_total, score_col], errors="coerce").dropna()
+            if len(v):
+                return float(v.iloc[0])
+
+    s = pd.to_numeric(df[score_col], errors="coerce")
+    if s.dropna().empty:
+        return None
+
+    if tickets_col:
+        w = pd.to_numeric(df[tickets_col], errors="coerce").fillna(0)
+        ok = s.notna() & (w > 0)
+        if ok.any():
+            return float((s[ok] * w[ok]).sum() / w[ok].sum())
+
+    return float(s.mean())
+
+def avg_score_from_city_kpi_with_city_filter(df: pd.DataFrame, mode: str, selected_cities: list[str]) -> float | None:
+    """
+    For Tickets by City / Build / Update city tables:
+    - If selected_cities is provided: weighted avg across those cities
+    - Else: take Total row avg score (or fallback computed avg)
+    """
+    cm = city_metrics_from_report(df, mode)
+    if cm is None or "avg_score" not in cm.columns:
+        return extract_total_avg_score_from_kpi(df, mode)
+
+    cm = cm.dropna(subset=["avg_score"]).copy()
+    if cm.empty:
+        return None
+
+    if selected_cities:
+        cm = cm[cm["City"].isin(selected_cities)]
+        if cm.empty:
+            return None
+        if "tickets" in cm.columns and cm["tickets"].sum() > 0:
+            return float((cm["avg_score"] * cm["tickets"]).sum() / cm["tickets"].sum())
+        return float(cm["avg_score"].mean())
+
+    return extract_total_avg_score_from_kpi(df, mode)
+
 # Ticket type from Subject (overall export)
 def map_ticket_type_from_subject(subject: str) -> str:
     s = ("" if subject is None else str(subject)).strip().lower()
@@ -344,7 +420,7 @@ def load_data(mode: str):
 
     overall_small = overall[["__ref__", "Reference ID", "Subject", "ticket_type_raw", "ticket_type", "city", "market"]].copy()
 
-    # ---- Evaluation report (SCORES SOURCE OF TRUTH)
+    # ---- Evaluation report (SCORES SOURCE OF TRUTH for ticket rows + sent back + trends)
     ev = pd.read_csv(REPORT_PATH, low_memory=False)
     ev.columns = make_unique(ev.columns)
 
@@ -412,7 +488,7 @@ def load_data(mode: str):
     tickets["ticket_id"] = tickets["Reference ID"].astype(str)
     tickets["sent_back_to_catalog_events"] = pd.to_numeric(tickets["sent_back_to_catalog_events"], errors="coerce").fillna(0).astype(int)
 
-    # Source of truth files
+    # Source of truth KPI exports
     city_stats = read_kpi_csv(CITY_STATS_PATH)
     build_df = read_kpi_csv(BUILD_TICKETS_PATH)   # includes Existing
     update_df = read_kpi_csv(UPDATE_TICKETS_PATH)
@@ -523,24 +599,34 @@ with top_right:
 st.markdown("<hr/>", unsafe_allow_html=True)
 
 # ============================================================
-# KPIs (Scores from Evaluation Report ONLY)
+# KPIs (SOURCE OF TRUTH = KPI EXPORT TOTALS)
 # ============================================================
 k1, k2, k3, k4, k5 = st.columns(5)
 
 cat_rows = rf[rf["is_non_studio"]].copy()
 stu_rows = rf[rf["is_studio"]].copy()
-tot_rows = rf[rf["bucket"] == "Total"].copy()
 
-cat_avg = mean_pct(cat_rows["score_pct"])
-stu_avg = mean_pct(stu_rows["score_pct"])
-tot_avg = mean_pct(tot_rows["score_pct"])
+# Catalog + Studio from Agent KPI exports (TOTAL row)
+cat_avg_kpi = extract_total_avg_score_from_kpi(catalog_agent_scores_df, mode)
+stu_avg_kpi = extract_total_avg_score_from_kpi(studio_agent_scores_df, mode)
 
+# Total QC from Tickets-by-City TOTAL (and respects City filter)
+if ticket_view == "Update Tickets":
+    total_src = update_df
+elif ticket_view in ["Build Tickets", "Existing Tickets"]:
+    total_src = build_df
+else:
+    total_src = city_stats_df
+
+tot_avg_kpi = avg_score_from_city_kpi_with_city_filter(total_src, mode, sel_city)
+
+# Sent Back counts stay from evaluation report
 sent_back_catalog_tickets = cat_rows.groupby("__ref__")["sent_back_catalog"].max().fillna(0).gt(0).sum()
 sent_back_studio_tickets = stu_rows.groupby("__ref__")["sent_back_catalog"].max().fillna(0).gt(0).sum()
 
-with k1: kpi_card("Catalog QC", "—" if cat_avg is None else f"{cat_avg:.2f}%")
-with k2: kpi_card("Studio QC", "—" if stu_avg is None else f"{stu_avg:.2f}%")
-with k3: kpi_card("Total QC (Ticket)", "—" if tot_avg is None else f"{tot_avg:.2f}%")
+with k1: kpi_card("Catalog QC", "—" if cat_avg_kpi is None else f"{cat_avg_kpi:.2f}%")
+with k2: kpi_card("Studio QC", "—" if stu_avg_kpi is None else f"{stu_avg_kpi:.2f}%")
+with k3: kpi_card("Total QC (Ticket)", "—" if tot_avg_kpi is None else f"{tot_avg_kpi:.2f}%")
 with k4: kpi_card("Sent Back → Catalog (Tickets)", f"{int(sent_back_catalog_tickets):,}")
 with k5: kpi_card("Sent Back → Studio (Tickets)", f"{int(sent_back_studio_tickets):,}")
 
@@ -558,8 +644,10 @@ c1, c2, c3 = st.columns([0.34, 0.33, 0.33])
 with c1:
     st.markdown("### Ticket type split")
 
-    # We ONLY show Build + Update.
-    # Existing is NOT shown because it's included in Build KPI export.
+    def apply_city_filter_to_city_table(cm: pd.DataFrame, selected_cities: list[str]) -> pd.DataFrame:
+        if not selected_cities:
+            return cm
+        return cm[cm["City"].isin(selected_cities)].copy()
 
     def tickets_total_from_city_table(df: pd.DataFrame, mode: str, selected_cities: list[str]) -> int | None:
         cm = city_metrics_from_report(df, mode)
@@ -570,43 +658,36 @@ with c1:
             return 0
         return int(pd.to_numeric(cm["tickets"], errors="coerce").fillna(0).sum())
 
-    # Prefer city-filtered KPI totals if City filter is selected
     if sel_city:
         b = tickets_total_from_city_table(build_df, mode, sel_city)
         u = tickets_total_from_city_table(update_df, mode, sel_city)
         st.caption(f"Using KPI exports by City ({mode}) (City filter applied).")
     else:
-        # Otherwise use report totals (Total row / summed column)
         b = build_total
         u = update_total
         st.caption(f"Using KPI export totals ({mode}).")
 
-    # Safety fallback if something is missing
     if b is None or u is None:
         st.warning("Could not read Build/Update totals from KPI exports. Check the CSV export format.")
-        # last-resort fallback: count from filtered tickets (may not match iStep)
         tmp = tf["ticket_type"].fillna("Other").value_counts().to_dict()
         b = int(tmp.get("Build Tickets", 0) + tmp.get("Existing Tickets", 0))
         u = int(tmp.get("Update Tickets", 0))
 
-    tt = pd.DataFrame(
-        {"ticket_type": ["Build Tickets", "Update Tickets"], "count": [int(b), int(u)]}
-    )
+    tt = pd.DataFrame({"ticket_type": ["Build Tickets", "Update Tickets"], "count": [int(b), int(u)]})
 
     fig = px.pie(tt, names="ticket_type", values="count", hole=0.55)
     fig.update_layout(height=320, margin=dict(l=10, r=10, t=10, b=10))
     st.plotly_chart(fig, use_container_width=True)
+
 # -------------------------
 # Avg QC Score by City (source-of-truth)
 # -------------------------
 with c2:
     st.markdown("### Avg QC Score by City")
 
-    # Choose report source based on ticket filter
     if ticket_view == "Update Tickets":
         src = update_df
     elif ticket_view in ["Build Tickets", "Existing Tickets"]:
-        # Existing is included in build report (your rule)
         src = build_df
         st.caption(f"Build Tickets ({mode}).")
     else:
@@ -643,6 +724,7 @@ with c3:
         src = build_df
     else:
         src = city_stats_df
+
     cm = city_metrics_from_report(src, mode)
 
     if cm is None or "tickets" not in cm.columns:
