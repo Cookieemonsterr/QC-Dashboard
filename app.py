@@ -18,6 +18,11 @@ CITY_STATS_PATH = "Tickets by City.csv"
 BUILD_TICKETS_PATH = "Build Tickets.csv"
 UPDATE_TICKETS_PATH = "Update Tickets.csv"
 
+# ✅ NEW: KPI exports by Market
+MARKET_STATS_PATH = "Tickets by Market.csv"
+BUILD_TICKETS_MARKET_PATH = "Build Tickets by Market.csv"
+UPDATE_TICKETS_MARKET_PATH = "Update Tickets by Market.csv"
+
 CATALOG_AGENT_SCORES_PATH = "Catalog Agents Scores.csv"
 STUDIO_AGENT_SCORES_PATH = "Studio Agents Scores.csv"
 
@@ -94,10 +99,6 @@ def to_pct(series: pd.Series) -> pd.Series:
         s = s * 100
     return s
 
-def mean_pct(x: pd.Series):
-    x = pd.to_numeric(x, errors="coerce")
-    return None if x.dropna().empty else float(x.mean())
-
 def kpi_card(label: str, value: str):
     st.markdown(
         f'<div class="kpi"><div class="label">{label}</div><div class="value">{value}</div></div>',
@@ -146,11 +147,6 @@ def read_kpi_csv(path: str) -> pd.DataFrame:
     return df
 
 def extract_total_tickets_from_report(df: pd.DataFrame, mode: str = "Monthly") -> int | None:
-    """
-    Extract total tickets from Build/Update report:
-    - Prefer a 'Total' row if exists
-    - Else sum the tickets column
-    """
     candidates = [
         f"Total Tickets Resolved {mode}",
         "Total Tickets Resolved",
@@ -189,12 +185,12 @@ def extract_total_tickets_from_report(df: pd.DataFrame, mode: str = "Monthly") -
         return None
     return int(vals.sum())
 
-def city_metrics_from_report(df: pd.DataFrame, mode: str) -> pd.DataFrame | None:
+def metrics_from_report(df: pd.DataFrame, mode: str, level: str) -> pd.DataFrame | None:
     """
-    Returns: City | tickets | avg_score (if columns exist)
-    Works for Tickets by City / Build Tickets / Update Tickets reports.
+    Generic: returns Level | tickets | avg_score (if columns exist)
+    level: "City" or "Market"
     """
-    city_col = safe_col(df, ["City", "city", "CITY"])
+    lvl_col = safe_col(df, [level, level.lower(), level.upper()])
     tickets_col = safe_col(
         df,
         [
@@ -216,10 +212,10 @@ def city_metrics_from_report(df: pd.DataFrame, mode: str) -> pd.DataFrame | None
         ],
     )
 
-    if not city_col:
+    if not lvl_col:
         return None
 
-    cols = [city_col]
+    cols = [lvl_col]
     if tickets_col:
         cols.append(tickets_col)
     if score_col:
@@ -227,15 +223,15 @@ def city_metrics_from_report(df: pd.DataFrame, mode: str) -> pd.DataFrame | None
 
     out = df[cols].copy()
 
-    rename_map = {city_col: "City"}
+    rename_map = {lvl_col: level}
     if tickets_col:
         rename_map[tickets_col] = "tickets"
     if score_col:
         rename_map[score_col] = "avg_score"
     out = out.rename(columns=rename_map)
 
-    out["City"] = out["City"].astype(str).str.strip()
-    out = out[~out["City"].str.lower().isin(["total", "unknown", "nan", ""])]
+    out[level] = out[level].astype(str).str.strip()
+    out = out[~out[level].str.lower().isin(["total", "unknown", "nan", ""])]
 
     if "tickets" in out.columns:
         out["tickets"] = pd.to_numeric(out["tickets"], errors="coerce").fillna(0).astype(int)
@@ -246,12 +242,6 @@ def city_metrics_from_report(df: pd.DataFrame, mode: str) -> pd.DataFrame | None
     return out
 
 def extract_total_avg_score_from_kpi(df: pd.DataFrame, mode: str) -> float | None:
-    """
-    Returns the TOTAL avg QC score from a KPI export.
-    Tries:
-      1) Find 'Total' row in a key column (Name/City/Market/Agent...) and read the avg score column.
-      2) Else: compute weighted avg using tickets if available, otherwise simple mean.
-    """
     key_col = safe_col(df, ["Name", "City", "Market", "Agent", "Agent Name"])
     score_col = safe_col(
         df,
@@ -297,13 +287,13 @@ def extract_total_avg_score_from_kpi(df: pd.DataFrame, mode: str) -> float | Non
 
     return float(s.mean())
 
-def avg_score_from_city_kpi_with_city_filter(df: pd.DataFrame, mode: str, selected_cities: list[str]) -> float | None:
+def avg_score_from_level_kpi_with_filter(df: pd.DataFrame, mode: str, level: str, selected: list[str]) -> float | None:
     """
-    For Tickets by City / Build / Update city tables:
-    - If selected_cities is provided: weighted avg across those cities
+    For Tickets-by-(City/Market) tables:
+    - If selected provided: weighted avg across selected values
     - Else: take Total row avg score (or fallback computed avg)
     """
-    cm = city_metrics_from_report(df, mode)
+    cm = metrics_from_report(df, mode, level)
     if cm is None or "avg_score" not in cm.columns:
         return extract_total_avg_score_from_kpi(df, mode)
 
@@ -311,8 +301,8 @@ def avg_score_from_city_kpi_with_city_filter(df: pd.DataFrame, mode: str, select
     if cm.empty:
         return None
 
-    if selected_cities:
-        cm = cm[cm["City"].isin(selected_cities)]
+    if selected:
+        cm = cm[cm[level].isin(selected)]
         if cm.empty:
             return None
         if "tickets" in cm.columns and cm["tickets"].sum() > 0:
@@ -320,6 +310,16 @@ def avg_score_from_city_kpi_with_city_filter(df: pd.DataFrame, mode: str, select
         return float(cm["avg_score"].mean())
 
     return extract_total_avg_score_from_kpi(df, mode)
+
+def tickets_total_from_level_table(df: pd.DataFrame, mode: str, level: str, selected: list[str]) -> int | None:
+    cm = metrics_from_report(df, mode, level)
+    if cm is None or "tickets" not in cm.columns:
+        return None
+    if selected:
+        cm = cm[cm[level].isin(selected)].copy()
+    if cm is None or cm.empty:
+        return 0
+    return int(pd.to_numeric(cm["tickets"], errors="coerce").fillna(0).sum())
 
 # Ticket type from Subject (overall export)
 def map_ticket_type_from_subject(subject: str) -> str:
@@ -373,7 +373,6 @@ def bucket_for_row(ticket_type: str, form_name: str):
     if fn in STUDIO_FORMS:
         return "Studio"
 
-    # Total bucket (keep as you want)
     if (tt == "Build Tickets") and (fn in BUILD_MAIN_FORMS):
         return "Total"
     if (tt == "Update Tickets") and (fn == "Update scorecard"):
@@ -400,6 +399,12 @@ def load_data(mode: str):
     file_exists_or_stop(CITY_STATS_PATH, "tickets by city")
     file_exists_or_stop(BUILD_TICKETS_PATH, "build tickets")
     file_exists_or_stop(UPDATE_TICKETS_PATH, "update tickets")
+
+    # ✅ NEW: by market
+    file_exists_or_stop(MARKET_STATS_PATH, "tickets by market")
+    file_exists_or_stop(BUILD_TICKETS_MARKET_PATH, "build tickets by market")
+    file_exists_or_stop(UPDATE_TICKETS_MARKET_PATH, "update tickets by market")
+
     file_exists_or_stop(CATALOG_AGENT_SCORES_PATH, "catalog agent scores")
     file_exists_or_stop(STUDIO_AGENT_SCORES_PATH, "studio agent scores")
 
@@ -450,16 +455,13 @@ def load_data(mode: str):
     ev["dt"] = pd.to_datetime(ev[dt_col], errors="coerce") if dt_col else pd.NaT
     ev["date"] = ev["dt"].dt.date
 
-    # Ticket type mapping from overall (critical for filters + Total logic)
     ref_to_type = dict(zip(overall_small["__ref__"], overall_small["ticket_type"]))
     ev["ticket_type"] = ev["__ref__"].map(ref_to_type).fillna("Other")
 
-    # Buckets + flags
     ev["bucket"] = ev.apply(lambda r: bucket_for_row(r["ticket_type"], r["form_name"]), axis=1)
     ev["is_studio"] = ev["form_name"].isin(STUDIO_FORMS)
-    ev["is_non_studio"] = ~ev["is_studio"]  # Catalog QC = everything except studio
+    ev["is_non_studio"] = ~ev["is_studio"]
 
-    # Merge in city/market/subject without overwriting ticket_type
     rows = ev.merge(
         overall_small[["__ref__", "Reference ID", "Subject", "ticket_type_raw", "city", "market"]],
         on="__ref__",
@@ -472,7 +474,6 @@ def load_data(mode: str):
     rows["market"] = rows["market"].fillna("Unknown")
     rows["city"] = rows["city"].fillna("Unknown")
 
-    # Ticket-level (for table)
     per_cat = rows[rows["is_non_studio"]].groupby("__ref__", as_index=False)["score_pct"].mean().rename(columns={"score_pct": "catalog_qc"})
     per_stu = rows[rows["is_studio"]].groupby("__ref__", as_index=False)["score_pct"].mean().rename(columns={"score_pct": "studio_qc"})
     per_tot = rows[rows["bucket"] == "Total"].groupby("__ref__", as_index=False)["score_pct"].mean().rename(columns={"score_pct": "total_qc"})
@@ -488,13 +489,21 @@ def load_data(mode: str):
     tickets["ticket_id"] = tickets["Reference ID"].astype(str)
     tickets["sent_back_to_catalog_events"] = pd.to_numeric(tickets["sent_back_to_catalog_events"], errors="coerce").fillna(0).astype(int)
 
-    # Source of truth KPI exports
+    # KPI exports by city
     city_stats = read_kpi_csv(CITY_STATS_PATH)
     build_df = read_kpi_csv(BUILD_TICKETS_PATH)   # includes Existing
     update_df = read_kpi_csv(UPDATE_TICKETS_PATH)
 
     build_total = extract_total_tickets_from_report(build_df, mode=mode)
     update_total = extract_total_tickets_from_report(update_df, mode=mode)
+
+    # ✅ KPI exports by market
+    market_stats = read_kpi_csv(MARKET_STATS_PATH)
+    build_market_df = read_kpi_csv(BUILD_TICKETS_MARKET_PATH)
+    update_market_df = read_kpi_csv(UPDATE_TICKETS_MARKET_PATH)
+
+    build_market_total = extract_total_tickets_from_report(build_market_df, mode=mode)
+    update_market_total = extract_total_tickets_from_report(update_market_df, mode=mode)
 
     catalog_agent_scores = read_kpi_csv(CATALOG_AGENT_SCORES_PATH)
     studio_agent_scores = read_kpi_csv(STUDIO_AGENT_SCORES_PATH)
@@ -507,6 +516,11 @@ def load_data(mode: str):
         update_df,
         build_total,
         update_total,
+        market_stats,
+        build_market_df,
+        update_market_df,
+        build_market_total,
+        update_market_total,
         catalog_agent_scores,
         studio_agent_scores,
     )
@@ -521,6 +535,11 @@ with st.spinner("Loading…"):
         update_df,
         build_total,
         update_total,
+        market_stats_df,
+        build_market_df,
+        update_market_df,
+        build_market_total,
+        update_market_total,
         catalog_agent_scores_df,
         studio_agent_scores_df,
     ) = load_data(mode)
@@ -577,10 +596,6 @@ if sel_studio_agent:
 allowed_refs = set(rf["__ref__"].dropna().astype(str))
 tf = tickets_df[tickets_df["__ref__"].astype(str).isin(allowed_refs)].copy()
 
-filters_applied = any([ticket_view != "All", sel_city, sel_market, sel_catalog_agent, sel_studio_agent]) or (
-    isinstance(date_range, tuple) and len(date_range) == 2 and (date_range[0] is not None or date_range[1] is not None)
-)
-
 # ============================================================
 # HEADER
 # ============================================================
@@ -606,21 +621,27 @@ k1, k2, k3, k4, k5 = st.columns(5)
 cat_rows = rf[rf["is_non_studio"]].copy()
 stu_rows = rf[rf["is_studio"]].copy()
 
-# Catalog + Studio from Agent KPI exports (TOTAL row)
 cat_avg_kpi = extract_total_avg_score_from_kpi(catalog_agent_scores_df, mode)
 stu_avg_kpi = extract_total_avg_score_from_kpi(studio_agent_scores_df, mode)
 
-# Total QC from Tickets-by-City TOTAL (and respects City filter)
+# Total QC (Ticket) — respects City first, else Market
 if ticket_view == "Update Tickets":
-    total_src = update_df
+    total_src_city = update_df
+    total_src_market = update_market_df
 elif ticket_view in ["Build Tickets", "Existing Tickets"]:
-    total_src = build_df
+    total_src_city = build_df
+    total_src_market = build_market_df
 else:
-    total_src = city_stats_df
+    total_src_city = city_stats_df
+    total_src_market = market_stats_df
 
-tot_avg_kpi = avg_score_from_city_kpi_with_city_filter(total_src, mode, sel_city)
+if sel_city:
+    tot_avg_kpi = avg_score_from_level_kpi_with_filter(total_src_city, mode, "City", sel_city)
+elif sel_market:
+    tot_avg_kpi = avg_score_from_level_kpi_with_filter(total_src_market, mode, "Market", sel_market)
+else:
+    tot_avg_kpi = extract_total_avg_score_from_kpi(total_src_city, mode)
 
-# Sent Back counts stay from evaluation report
 sent_back_catalog_tickets = cat_rows.groupby("__ref__")["sent_back_catalog"].max().fillna(0).gt(0).sum()
 sent_back_studio_tickets = stu_rows.groupby("__ref__")["sent_back_catalog"].max().fillna(0).gt(0).sum()
 
@@ -639,29 +660,19 @@ st.markdown("## Insights")
 c1, c2, c3 = st.columns([0.34, 0.33, 0.33])
 
 # -------------------------
-# Ticket type split
+# Ticket type split (respects City else Market)
 # -------------------------
 with c1:
     st.markdown("### Ticket type split")
 
-    def apply_city_filter_to_city_table(cm: pd.DataFrame, selected_cities: list[str]) -> pd.DataFrame:
-        if not selected_cities:
-            return cm
-        return cm[cm["City"].isin(selected_cities)].copy()
-
-    def tickets_total_from_city_table(df: pd.DataFrame, mode: str, selected_cities: list[str]) -> int | None:
-        cm = city_metrics_from_report(df, mode)
-        if cm is None or "tickets" not in cm.columns:
-            return None
-        cm = apply_city_filter_to_city_table(cm, selected_cities)  # respects City filter
-        if cm is None or cm.empty:
-            return 0
-        return int(pd.to_numeric(cm["tickets"], errors="coerce").fillna(0).sum())
-
     if sel_city:
-        b = tickets_total_from_city_table(build_df, mode, sel_city)
-        u = tickets_total_from_city_table(update_df, mode, sel_city)
+        b = tickets_total_from_level_table(build_df, mode, "City", sel_city)
+        u = tickets_total_from_level_table(update_df, mode, "City", sel_city)
         st.caption(f"Using KPI exports by City ({mode}) (City filter applied).")
+    elif sel_market:
+        b = tickets_total_from_level_table(build_market_df, mode, "Market", sel_market)
+        u = tickets_total_from_level_table(update_market_df, mode, "Market", sel_market)
+        st.caption(f"Using KPI exports by Market ({mode}) (Market filter applied).")
     else:
         b = build_total
         u = update_total
@@ -674,7 +685,6 @@ with c1:
         u = int(tmp.get("Update Tickets", 0))
 
     tt = pd.DataFrame({"ticket_type": ["Build Tickets", "Update Tickets"], "count": [int(b), int(u)]})
-
     fig = px.pie(tt, names="ticket_type", values="count", hole=0.55)
     fig.update_layout(height=320, margin=dict(l=10, r=10, t=10, b=10))
     st.plotly_chart(fig, use_container_width=True)
@@ -687,29 +697,27 @@ with c2:
 
     if ticket_view == "Update Tickets":
         src = update_df
+        st.caption(f"Update Tickets by City ({mode}).")
     elif ticket_view in ["Build Tickets", "Existing Tickets"]:
         src = build_df
-        st.caption(f"Build Tickets ({mode}).")
+        st.caption(f"Build Tickets by City ({mode}).")
     else:
         src = city_stats_df
         st.caption(f"Scores by City ({mode}).")
 
-    cm = city_metrics_from_report(src, mode)
+    cm = metrics_from_report(src, mode, "City")
 
     if cm is None or "avg_score" not in cm.columns:
         st.info("Couldn’t detect the Avg QC Score column in this report export.")
     else:
+        if sel_city:
+            cm = cm[cm["City"].isin(sel_city)]
         cm = cm.dropna(subset=["avg_score"]).sort_values("avg_score", ascending=False).head(20)
         if cm.empty:
             st.info("No city score data found.")
         else:
             fig = px.bar(cm, x="City", y="avg_score")
-            fig.update_layout(
-                height=320,
-                margin=dict(l=10, r=10, t=10, b=10),
-                xaxis_title="",
-                yaxis_title="Avg QC Score",
-            )
+            fig.update_layout(height=320, margin=dict(l=10, r=10, t=10, b=10), xaxis_title="", yaxis_title="Avg QC Score")
             st.plotly_chart(fig, use_container_width=True)
 
 # -------------------------
@@ -725,22 +733,81 @@ with c3:
     else:
         src = city_stats_df
 
-    cm = city_metrics_from_report(src, mode)
+    cm = metrics_from_report(src, mode, "City")
 
     if cm is None or "tickets" not in cm.columns:
         st.info("Couldn’t detect the Tickets column in this report export.")
     else:
+        if sel_city:
+            cm = cm[cm["City"].isin(sel_city)]
         cm = cm.sort_values("tickets", ascending=False).head(20)
         if cm.empty:
             st.info("No city ticket data found.")
         else:
             fig = px.bar(cm, x="City", y="tickets")
-            fig.update_layout(
-                height=320,
-                margin=dict(l=10, r=10, t=10, b=10),
-                xaxis_title="",
-                yaxis_title="Tickets",
-            )
+            fig.update_layout(height=320, margin=dict(l=10, r=10, t=10, b=10), xaxis_title="", yaxis_title="Tickets")
+            st.plotly_chart(fig, use_container_width=True)
+
+st.markdown("<br/>", unsafe_allow_html=True)
+
+# ============================================================
+# ✅ NEW: MARKET INSIGHTS (these are what change when Market filter is used)
+# ============================================================
+st.markdown("## Market Insights (KPI Exports)")
+
+m1, m2 = st.columns(2)
+
+with m1:
+    st.markdown("### Avg QC Score by Market")
+
+    if ticket_view == "Update Tickets":
+        src = update_market_df
+        st.caption(f"Update Tickets by Market ({mode}).")
+    elif ticket_view in ["Build Tickets", "Existing Tickets"]:
+        src = build_market_df
+        st.caption(f"Build Tickets by Market ({mode}).")
+    else:
+        src = market_stats_df
+        st.caption(f"Scores by Market ({mode}).")
+
+    mm = metrics_from_report(src, mode, "Market")
+
+    if mm is None or "avg_score" not in mm.columns:
+        st.info("Couldn’t detect the Avg QC Score column in this Market report export.")
+    else:
+        if sel_market:
+            mm = mm[mm["Market"].isin(sel_market)]
+        mm = mm.dropna(subset=["avg_score"]).sort_values("avg_score", ascending=False).head(20)
+        if mm.empty:
+            st.info("No market score data found.")
+        else:
+            fig = px.bar(mm, x="Market", y="avg_score")
+            fig.update_layout(height=360, margin=dict(l=10, r=10, t=10, b=10), xaxis_title="", yaxis_title="Avg QC Score")
+            st.plotly_chart(fig, use_container_width=True)
+
+with m2:
+    st.markdown("### Tickets by Market")
+
+    if ticket_view == "Update Tickets":
+        src = update_market_df
+    elif ticket_view in ["Build Tickets", "Existing Tickets"]:
+        src = build_market_df
+    else:
+        src = market_stats_df
+
+    mm = metrics_from_report(src, mode, "Market")
+
+    if mm is None or "tickets" not in mm.columns:
+        st.info("Couldn’t detect the Tickets column in this Market report export.")
+    else:
+        if sel_market:
+            mm = mm[mm["Market"].isin(sel_market)]
+        mm = mm.sort_values("tickets", ascending=False).head(20)
+        if mm.empty:
+            st.info("No market ticket data found.")
+        else:
+            fig = px.bar(mm, x="Market", y="tickets")
+            fig.update_layout(height=360, margin=dict(l=10, r=10, t=10, b=10), xaxis_title="", yaxis_title="Tickets")
             st.plotly_chart(fig, use_container_width=True)
 
 st.markdown("<br/>", unsafe_allow_html=True)
