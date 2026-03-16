@@ -1088,7 +1088,6 @@ st.markdown("## 🔍 Catalog Mistakes")
 st.caption(
     "All Mistakes per Month "
     )
-)
 
 # Load all available files — silently skip missing ones
 mistakes_data: dict[str, pd.DataFrame] = {}
