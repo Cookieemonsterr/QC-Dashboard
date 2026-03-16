@@ -1085,7 +1085,6 @@ st.markdown("<br/>", unsafe_allow_html=True)
 # ★ CATALOG MISTAKES  (folder / zip sources)
 # ============================================================
 st.markdown("## 🔍 Catalog Mistakes")
-    + ", ".join(f"`{s}.xlsx`" for s in MISTAKES_FILES.values())
 )
 
 # Load all available files — silently skip missing ones
