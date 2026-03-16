@@ -888,7 +888,6 @@ st.markdown("<br/>", unsafe_allow_html=True)
 # ★ DAILY TRENDS  (from Evaluation Report)
 # ============================================================
 st.markdown("## 📅 Daily Trends")
-st.caption("All daily data is derived directly from the Evaluation Report — no extra files needed.")
 
 daily_df = rf.dropna(subset=["dt"]).copy()
 daily_df["date_only"] = daily_df["dt"].dt.date
@@ -1086,9 +1085,6 @@ st.markdown("<br/>", unsafe_allow_html=True)
 # ★ CATALOG MISTAKES  (folder / zip sources)
 # ============================================================
 st.markdown("## 🔍 Catalog Mistakes")
-st.caption(
-    "Place your mistakes files next to `app.py`. "
-    "Accepted names (xlsx or csv): "
     + ", ".join(f"`{s}.xlsx`" for s in MISTAKES_FILES.values())
 )
 
