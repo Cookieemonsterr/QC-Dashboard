@@ -888,6 +888,7 @@ st.markdown("<br/>", unsafe_allow_html=True)
 # ★ DAILY TRENDS  (from Evaluation Report)
 # ============================================================
 st.markdown("## 📅 Daily Trends")
+st.caption("All daily data is derived directly from the Evaluation Report — no extra files needed.")
 
 daily_df = rf.dropna(subset=["dt"]).copy()
 daily_df["date_only"] = daily_df["dt"].dt.date
@@ -970,24 +971,45 @@ else:
         # ── Per-agent daily summary table (only when agents selected)
         if sel_daily_agents:
             st.markdown("### Agent Daily Summary")
+            _agent_src = ddf[ddf["agent_name"].isin(sel_daily_agents)].copy()
+            _agent_src_valid = _agent_src[_agent_src["score_pct"] > 0]  # exclude zero scores for min
             agent_daily = (
-                ddf[ddf["agent_name"].isin(sel_daily_agents)]
+                _agent_src
                 .groupby(["date_only", "agent_name"], as_index=False)
                 .agg(
                     evaluations=("__ref__", "count"),
                     unique_tickets=("__ref__", "nunique"),
                     avg_score=("score_pct", "mean"),
-                    min_score=("score_pct", "min"),
                     max_score=("score_pct", "max"),
                 )
                 .sort_values(["date_only", "agent_name"], ascending=[False, True])
             )
+            # Min score: only non-zero scores
+            min_by_agent_day = (
+                _agent_src_valid
+                .groupby(["date_only", "agent_name"], as_index=False)["score_pct"].min()
+                .rename(columns={"score_pct": "min_score"})
+            )
+            agent_daily = agent_daily.merge(min_by_agent_day, on=["date_only", "agent_name"], how="left")
+
+            # Total row
+            total_row = pd.DataFrame([{
+                "date_only": "── TOTAL",
+                "agent_name": f"{len(sel_daily_agents)} agents",
+                "evaluations": int(_agent_src["__ref__"].count()),
+                "unique_tickets": int(_agent_src["__ref__"].nunique()),
+                "avg_score": _agent_src["score_pct"].mean(),
+                "min_score": _agent_src_valid["score_pct"].min() if not _agent_src_valid.empty else None,
+                "max_score": _agent_src["score_pct"].max(),
+            }])
+            agent_daily_display = pd.concat([agent_daily, total_row], ignore_index=True)
+
             st.dataframe(
-                agent_daily,
+                agent_daily_display,
                 use_container_width=True,
                 height=420,
                 column_config={
-                    "date_only": st.column_config.DateColumn("Date"),
+                    "date_only": "Date",
                     "agent_name": "Agent",
                     "evaluations": st.column_config.NumberColumn("Evaluations"),
                     "unique_tickets": st.column_config.NumberColumn("Unique Tickets"),
@@ -1005,24 +1027,44 @@ else:
         else:
             # Overall daily table when no specific agents selected
             st.markdown("### Daily Summary")
+            _ddf_valid = ddf[ddf["score_pct"] > 0]  # exclude zero scores for min
             daily_summary = (
                 ddf.groupby("date_only", as_index=False)
                 .agg(
                     evaluations=("__ref__", "count"),
                     unique_tickets=("__ref__", "nunique"),
                     avg_score=("score_pct", "mean"),
-                    min_score=("score_pct", "min"),
                     max_score=("score_pct", "max"),
                     agents=("agent_name", "nunique"),
                 )
                 .sort_values("date_only", ascending=False)
             )
+            # Min score per day: only non-zero
+            min_by_day = (
+                _ddf_valid
+                .groupby("date_only", as_index=False)["score_pct"].min()
+                .rename(columns={"score_pct": "min_score"})
+            )
+            daily_summary = daily_summary.merge(min_by_day, on="date_only", how="left")
+
+            # Total row across the whole selected range
+            total_row = pd.DataFrame([{
+                "date_only": "── TOTAL",
+                "evaluations": int(ddf["__ref__"].count()),
+                "unique_tickets": int(ddf["__ref__"].nunique()),
+                "avg_score": ddf["score_pct"].mean(),
+                "min_score": _ddf_valid["score_pct"].min() if not _ddf_valid.empty else None,
+                "max_score": ddf["score_pct"].max(),
+                "agents": int(ddf["agent_name"].nunique()),
+            }])
+            daily_summary_display = pd.concat([daily_summary, total_row], ignore_index=True)
+
             st.dataframe(
-                daily_summary,
+                daily_summary_display,
                 use_container_width=True,
                 height=400,
                 column_config={
-                    "date_only": st.column_config.DateColumn("Date"),
+                    "date_only": "Date",
                     "evaluations": st.column_config.NumberColumn("Evaluations"),
                     "unique_tickets": st.column_config.NumberColumn("Unique Tickets"),
                     "avg_score": st.column_config.NumberColumn("Avg Score", format="%.2f%%"),
@@ -1085,9 +1127,7 @@ st.markdown("<br/>", unsafe_allow_html=True)
 # ★ CATALOG MISTAKES  (folder / zip sources)
 # ============================================================
 st.markdown("## 🔍 Catalog Mistakes")
-st.caption(
-    "All Mistakes per Month "
-    )
+st.caption("All Mistakes per Month")
 
 # Load all available files — silently skip missing ones
 mistakes_data: dict[str, pd.DataFrame] = {}
