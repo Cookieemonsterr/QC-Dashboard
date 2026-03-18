@@ -444,7 +444,23 @@ def load_data(mode: str):
     overall["city"] = overall[city_col] if city_col else pd.NA
     overall["market"] = overall[market_col] if market_col else pd.NA
 
-    overall_small = overall[["__ref__", "Reference ID", "Subject", "ticket_type_raw", "ticket_type", "city", "market"]].copy()
+    # Parse Ticket Score from istep_data
+    ticket_score_col = safe_col(overall, ["Ticket Score", "ticket_score"])
+    if ticket_score_col:
+        overall["ticket_score"] = (
+            overall[ticket_score_col].astype(str)
+            .str.replace("%", "", regex=False).str.strip()
+        )
+        overall["ticket_score"] = pd.to_numeric(overall["ticket_score"], errors="coerce")
+        # If stored as 0–1 fractions, scale up
+        _ts = overall["ticket_score"].dropna()
+        if not _ts.empty and (_ts <= 1.5).mean() > 0.7:
+            overall["ticket_score"] = overall["ticket_score"] * 100
+    else:
+        overall["ticket_score"] = pd.NA
+
+    overall_small = overall[["__ref__", "Reference ID", "Subject", "ticket_type_raw", "ticket_type", "city", "market", "ticket_score"]].copy()
+    overall_small["__ref__"] = overall_small["__ref__"].astype(str).str.strip()
 
     # ---- Evaluation report
     ev = pd.read_csv(REPORT_PATH, low_memory=False)
@@ -483,6 +499,10 @@ def load_data(mode: str):
     ev["is_studio"] = ev["form_name"].isin(STUDIO_FORMS)
     ev["is_non_studio"] = ~ev["is_studio"]
 
+    # Ensure ref IDs match exactly before merge
+    ev["__ref__"] = ev["__ref__"].astype(str).str.strip()
+    overall_small["__ref__"] = overall_small["__ref__"].astype(str).str.strip()
+
     rows = ev.merge(
         overall_small[["__ref__", "Reference ID", "Subject", "ticket_type_raw", "city", "market"]],
         on="__ref__",
@@ -503,6 +523,7 @@ def load_data(mode: str):
         .merge(per_stu, on="__ref__", how="left")
         .merge(per_tot, on="__ref__", how="left")
     )
+    # ticket_score already in overall_small, carried through the merge
     tickets["ticket_id"] = tickets["Reference ID"].astype(str)
     tickets["sent_back_to_catalog_events"] = pd.to_numeric(tickets["sent_back_to_catalog_events"], errors="coerce").fillna(0).astype(int)
 
@@ -562,8 +583,8 @@ max_dt = rows_df["dt"].max()
 default_range = (min_dt.date() if pd.notna(min_dt) else None, max_dt.date() if pd.notna(max_dt) else None)
 date_range = st.sidebar.date_input("Date range", value=default_range)
 
-cities = sorted([c for c in rows_df["city"].dropna().astype(str).unique() if c and c.lower() != "nan"])
-markets = sorted([m for m in rows_df["market"].dropna().astype(str).unique() if m and m.lower() != "nan"])
+cities = sorted([c for c in rows_df["city"].dropna().astype(str).unique() if c and c.lower() not in ("nan", "unknown", "")])
+markets = sorted([m for m in rows_df["market"].dropna().astype(str).unique() if m and m.lower() not in ("nan", "unknown", "")])
 
 catalog_agents = sorted(rows_df[rows_df["is_non_studio"]]["agent_name"].dropna().astype(str).unique())
 studio_agents = sorted(rows_df[rows_df["is_studio"]]["agent_name"].dropna().astype(str).unique())
@@ -591,9 +612,9 @@ if isinstance(date_range, tuple) and len(date_range) == 2:
         rf = rf[rf["date"] <= end]
 
 if sel_city:
-    rf = rf[rf["city"].isin(sel_city)]
+    rf = rf[rf["city"].astype(str).isin(sel_city)]
 if sel_market:
-    rf = rf[rf["market"].isin(sel_market)]
+    rf = rf[rf["market"].astype(str).isin(sel_market)]
 
 if sel_catalog_agent:
     rf = rf[~rf["is_non_studio"] | rf["agent_name"].isin(sel_catalog_agent)]
@@ -665,22 +686,9 @@ stu_rows = rf[rf["is_studio"]].copy()
 cat_avg_kpi = avg_score_from_combined_with_filter(catalog_agent_scores_df, "Name", [])
 stu_avg_kpi = avg_score_from_combined_with_filter(studio_agent_scores_df, "Name", [])
 
-if ticket_view == "Update Tickets":
-    total_src_city = update_city_df
-    total_src_market = update_market_df
-elif ticket_view in ["Build Tickets", "Existing Tickets"]:
-    total_src_city = build_city_df
-    total_src_market = build_market_df
-else:
-    total_src_city = city_stats_df
-    total_src_market = market_stats_df
-
-if sel_city:
-    tot_avg_kpi = avg_score_from_combined_with_filter(total_src_city, "City", sel_city)
-elif sel_market:
-    tot_avg_kpi = avg_score_from_combined_with_filter(total_src_market, "Market", sel_market)
-else:
-    tot_avg_kpi = avg_score_from_combined_with_filter(total_src_city, "City", [])
+# Total QC: average of Ticket Score from istep_data (respects all sidebar filters)
+_tot_scores = pd.to_numeric(tf["ticket_score"], errors="coerce").dropna() if "ticket_score" in tf.columns else pd.Series([], dtype=float)
+tot_avg_kpi = float(_tot_scores.mean()) if not _tot_scores.empty else None
 
 sent_back_catalog_tickets = cat_rows.groupby("__ref__")["sent_back_catalog"].max().fillna(0).gt(0).sum()
 sent_back_studio_tickets = stu_rows.groupby("__ref__")["sent_back_catalog"].max().fillna(0).gt(0).sum()
@@ -888,6 +896,7 @@ st.markdown("<br/>", unsafe_allow_html=True)
 # ★ DAILY TRENDS  (from Evaluation Report)
 # ============================================================
 st.markdown("## 📅 Daily Trends")
+st.caption("All daily data is derived directly from the Evaluation Report — no extra files needed.")
 
 daily_df = rf.dropna(subset=["dt"]).copy()
 daily_df["date_only"] = daily_df["dt"].dt.date
