@@ -429,37 +429,55 @@ def load_data(mode: str):
     file_exists_or_stop(BASE_PATH, "overall / metadata")
     file_exists_or_stop(REPORT_PATH, "evaluation report (scores)")
 
-    # ---- Overall
-    overall = pd.read_csv(BASE_PATH, low_memory=False)
-    overall.columns = make_unique(overall.columns)
-    overall = collapse_overall(overall)
+    # ---- Overall (fast load — only collapse the columns we actually need)
+    _raw = pd.read_csv(BASE_PATH, low_memory=False)
+    _raw.columns = make_unique(_raw.columns)
 
-    subj_col = safe_col(overall, ["Subject"])
+    # Identify only the columns we need before collapsing — avoids 260s groupby on 340 cols
+    _ref_col   = safe_col(_raw, ["Reference ID", "Ticket ID"]) or "Reference ID"
+    _subj_col  = safe_col(_raw, ["Subject"])
+    _city_col  = safe_col(_raw, ["Catalogue City", "City"])
+    _mkt_col   = safe_col(_raw, ["Catalogue Market", "Market"])
+    _score_col = safe_col(_raw, ["Ticket Score", "ticket_score"])
+
+    _needed = [c for c in [_subj_col, _city_col, _mkt_col, _score_col] if c]
+    _raw["__ref__"] = _raw[_ref_col].astype(str).str.strip()
+
+    if _needed:
+        # Collapse only the 4-5 needed columns — ~3s instead of ~260s
+        overall = _raw.groupby("__ref__", as_index=False)[_needed].agg(first_non_empty)
+        overall["Reference ID"] = overall["__ref__"]
+    else:
+        overall = _raw[["__ref__"]].drop_duplicates().copy()
+        overall["Reference ID"] = overall["__ref__"]
+
+    subj_col   = safe_col(overall, [_subj_col] if _subj_col else [])
+    city_col   = safe_col(overall, [_city_col]  if _city_col  else ["Catalogue City", "City"])
+    market_col = safe_col(overall, [_mkt_col]   if _mkt_col   else ["Catalogue Market", "Market"])
+    score_col  = safe_col(overall, [_score_col] if _score_col else ["Ticket Score"])
+
     overall["ticket_type_raw"] = overall[subj_col].astype(str) if subj_col else ""
     overall["ticket_type"] = overall["ticket_type_raw"].apply(map_ticket_type_from_subject)
-    overall["__ref__"] = overall["Reference ID"].astype(str).str.strip()
-
-    city_col = safe_col(overall, ["Catalogue City", "City"])
-    market_col = safe_col(overall, ["Catalogue Market", "Market"])
-    overall["city"] = overall[city_col] if city_col else pd.NA
+    overall["city"]   = overall[city_col]   if city_col   else pd.NA
     overall["market"] = overall[market_col] if market_col else pd.NA
 
-    # Parse Ticket Score from istep_data
-    ticket_score_col = safe_col(overall, ["Ticket Score", "ticket_score"])
-    if ticket_score_col:
+    if score_col:
         overall["ticket_score"] = (
-            overall[ticket_score_col].astype(str)
-            .str.replace("%", "", regex=False).str.strip()
+            overall[score_col].astype(str).str.replace("%", "", regex=False).str.strip()
         )
         overall["ticket_score"] = pd.to_numeric(overall["ticket_score"], errors="coerce")
-        # If stored as 0–1 fractions, scale up
         _ts = overall["ticket_score"].dropna()
         if not _ts.empty and (_ts <= 1.5).mean() > 0.7:
             overall["ticket_score"] = overall["ticket_score"] * 100
     else:
         overall["ticket_score"] = pd.NA
 
-    overall_small = overall[["__ref__", "Reference ID", "Subject", "ticket_type_raw", "ticket_type", "city", "market", "ticket_score"]].copy()
+    overall_small = overall[["__ref__", "Reference ID", "ticket_type_raw", "ticket_type", "city", "market", "ticket_score"]].copy()
+    # Add Subject if available
+    if subj_col and subj_col in overall.columns:
+        overall_small["Subject"] = overall[subj_col]
+    else:
+        overall_small["Subject"] = pd.NA
     overall_small["__ref__"] = overall_small["__ref__"].astype(str).str.strip()
 
     # ---- Evaluation report
