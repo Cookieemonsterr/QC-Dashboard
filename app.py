@@ -159,12 +159,33 @@ def read_kpi_csv(path: str) -> pd.DataFrame:
 
 def extract_month_from_filename(stem: str) -> str:
     s = stem.strip()
+    # Pattern 1: year-month or year_month (e.g. 2026-04, 2026_04, Report_2026-04)
     m = re.search(r"(20\d{2})[-_ ]?([01]\d)", s)
     if m:
         return f"{m.group(1)}-{m.group(2)}"
+    # Pattern 2: year then 2-digit month jammed together (e.g. 202604)
     m2 = re.search(r"(20\d{2})([01]\d)", s)
     if m2:
         return f"{m2.group(1)}-{m2.group(2)}"
+    # Pattern 3: month name + year (e.g. "April 2026", "Apr_2026", "april2026")
+    MONTHS = {
+        "january":"01","jan":"01","february":"02","feb":"02",
+        "march":"03","mar":"03","april":"04","apr":"04",
+        "may":"05","june":"06","jun":"06","july":"07","jul":"07",
+        "august":"08","aug":"08","september":"09","sep":"09","sept":"09",
+        "october":"10","oct":"10","november":"11","nov":"11",
+        "december":"12","dec":"12",
+    }
+    sl = s.lower()
+    for name, num in MONTHS.items():
+        if name in sl:
+            yr = re.search(r"(20\d{2})", sl)
+            if yr:
+                return f"{yr.group(1)}-{num}"
+    # Pattern 4: month number before year (e.g. 04-2026, 04_2026)
+    m4 = re.search(r"([01]\d)[-_ ](20\d{2})", s)
+    if m4:
+        return f"{m4.group(2)}-{m4.group(1)}"
     return s
 
 def resolve_source(name: str) -> tuple[str, Path]:
@@ -185,8 +206,15 @@ def resolve_source(name: str) -> tuple[str, Path]:
 def ensure_zip_extracted(zip_path: Path, extract_root: Path) -> Path:
     out_dir = extract_root / zip_path.stem
     out_dir.mkdir(parents=True, exist_ok=True)
-    if list(out_dir.rglob("*.csv")):
-        return out_dir
+
+    # Re-extract if zip is newer than the cached folder (catches added/updated files)
+    existing_csvs = list(out_dir.rglob("*.csv"))
+    zip_mtime = zip_path.stat().st_mtime
+    cache_mtime = max((f.stat().st_mtime for f in existing_csvs), default=0)
+    if existing_csvs and cache_mtime >= zip_mtime:
+        return out_dir  # cache is fresh, skip extraction
+
+    # Extract (or re-extract)
     try:
         with zipfile.ZipFile(zip_path, "r") as zf:
             zf.extractall(out_dir)
